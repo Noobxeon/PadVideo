@@ -15,6 +15,8 @@ with TemporaryDirectory(prefix="padvideo-smb-") as directory:
     server = smbserver.SimpleSMBServer(listenAddress="127.0.0.1", listenPort=1445)
     server.setSMB2Support(True)
     server.addShare("VIDEOS", directory, readOnly="yes")
+    server.addShare("家庭 影片", directory, readOnly="yes")
+    server.addShare("HIDDEN$", directory, readOnly="yes")
     server.addCredential(
         "padvideo",
         0,
