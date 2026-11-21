@@ -23,6 +23,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import com.padvideo.data.repository.SmbLocation
+import com.padvideo.data.repository.SmbRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -38,6 +42,13 @@ data class ActivePlaybackLaunch(
     val playlist: List<VideoItem> = listOf(video),
     val inlineInitialSrt: String? = null,
     val forceStartFromBeginning: Boolean = false
+)
+
+internal data class NetworkBrowserState(
+    val location: SmbLocation? = null,
+    val entries: List<SmbRepository.Entry> = emptyList(),
+    val loading: Boolean = false,
+    val message: String? = null
 )
 
 class MainViewModel(
@@ -103,6 +114,65 @@ class MainViewModel(
 
     private val _fileSearchQuery = MutableStateFlow("")
     val fileSearchQuery: StateFlow<String> = _fileSearchQuery.asStateFlow()
+
+    private val _networkBrowser = MutableStateFlow(NetworkBrowserState())
+    internal val networkBrowser = _networkBrowser.asStateFlow()
+    private var smbBrowseJob: Job? = null
+
+    internal fun connectSmb(address: String, credentials: SmbRepository.Credentials) {
+        val location = try {
+            SmbLocation.parse(address)
+        } catch (error: IllegalArgumentException) {
+            _networkBrowser.value = _networkBrowser.value.copy(message = error.message)
+            return
+        }
+        browseSmb(location, credentials)
+    }
+
+    internal fun openSmbEntry(entry: SmbRepository.Entry) {
+        if (entry.isFolder) {
+            browseSmb(entry.location)
+        } else {
+            val playlist = _networkBrowser.value.entries.filterNot { it.isFolder }.map { it.asVideo() }
+            _activeLaunch.value = ActivePlaybackLaunch(entry.asVideo(), playlist)
+        }
+    }
+
+    internal fun refreshSmb() {
+        _networkBrowser.value.location?.let { browseSmb(it) }
+    }
+
+    internal fun navigateUpSmb(): Boolean {
+        val state = _networkBrowser.value
+        if (state.loading) return true
+        val location = state.location ?: return false
+        if (location.segments.isEmpty()) return false
+        browseSmb(location.parent())
+        return true
+    }
+
+    private fun browseSmb(location: SmbLocation, credentials: SmbRepository.Credentials? = null) {
+        smbBrowseJob?.cancel()
+        smbBrowseJob = viewModelScope.launch {
+            val previous = _networkBrowser.value
+            _networkBrowser.value = previous.copy(loading = true, message = null)
+            try {
+                val entries = container.smbRepository.list(location, credentials)
+                _networkBrowser.value = NetworkBrowserState(location, entries)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val status = (error as? com.hierynomus.mssmb2.SMBApiException)?.status
+                val reason = when (status) {
+                    com.hierynomus.mserref.NtStatus.STATUS_LOGON_FAILURE -> "账号或密码错误"
+                    com.hierynomus.mserref.NtStatus.STATUS_ACCESS_DENIED -> "共享拒绝访问"
+                    com.hierynomus.mserref.NtStatus.STATUS_BAD_NETWORK_NAME -> "共享名称不存在"
+                    else -> "请检查服务器地址、网络连接和共享权限"
+                }
+                _networkBrowser.value = previous.copy(loading = false, message = "SMB 连接失败，" + reason)
+            }
+        }
+    }
 
     // Active Video Player Session
     private val _activeLaunch = MutableStateFlow<ActivePlaybackLaunch?>(null)
@@ -293,7 +363,10 @@ class MainViewModel(
         forceFromBeginning: Boolean = false,
         inlineInitialSrt: String? = null
     ) {
-        val playlist = container.fileExplorerRepository.findSiblingEpisodePlaylist(
+        val playlist = if (Uri.parse(video.uriString).scheme == "smb") {
+            _networkBrowser.value.entries.filterNot { it.isFolder }.map { it.asVideo() }
+                .takeIf { items -> items.any { it.uriString == video.uriString } } ?: listOf(video)
+        } else container.fileExplorerRepository.findSiblingEpisodePlaylist(
             currentVideo = video,
             libraryFallback = _rawLibraryVideos.value
         )

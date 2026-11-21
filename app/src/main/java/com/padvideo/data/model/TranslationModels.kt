@@ -18,7 +18,7 @@ enum class TranslationEngineType(val label: String, val description: String) {
     ),
     MLKIT_OFFLINE(
         label = "ML Kit 端侧离线翻译",
-        description = "下载 ~30MB 离线语言包后完全断网可用，零隐私外泄、超低延迟"
+        description = "下载所选语言模型后，可在设备上断网翻译字幕"
     ),
     OPENAI_COMPATIBLE(
         label = "AI 大模型精翻 (OpenAI / DeepSeek)",
@@ -31,7 +31,7 @@ enum class TranslationDisplayMode(val label: String, val shortBadge: String) {
     OFF("关闭实时翻译", "原字"),
     BILINGUAL("双语对照 (译文 + 原文)", "双语"),
     TARGET_ONLY("仅显示目标译文", "译文"),
-    LIVE_SPEECH_BILINGUAL("实时语音识别同传 (无字幕视频)", "同传")
+    LIVE_SPEECH_BILINGUAL("麦克风语音同传", "同传")
 }
 
 @Serializable

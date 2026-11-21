@@ -591,7 +591,7 @@ fun VideoPlayerScreen(
                                         append(" · A-B复读")
                                     }
                                     if (uiState.isTranslatingNow) {
-                                        append(" · AI预译中…")
+                                        append(" · 正在翻译…")
                                     }
                                 },
                                 color = Color(0xFF5EEAD4),
@@ -888,7 +888,8 @@ fun VideoPlayerScreen(
             onSelectEngine = { eng -> playerViewModel.updateTranslationConfig { it.copy(engine = eng) } },
             onSelectTargetLanguage = { lang -> playerViewModel.updateTranslationConfig { it.copy(targetLanguage = lang) } },
             onSelectSourceLanguage = { src -> playerViewModel.updateTranslationConfig { it.copy(sourceLanguageCode = src) } },
-            onDownloadOfflinePack = { lang, cb -> playerViewModel.downloadMlKitOfflinePack(lang, cb) },
+            translationError = uiState.translationError,
+            onDownloadOfflinePack = playerViewModel::downloadMlKitOfflinePack,
             onRequestMicPermissionAndStartLiveSpeech = {
                 val granted = ContextCompat.checkSelfPermission(
                     context,

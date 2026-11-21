@@ -1,6 +1,7 @@
 package com.padvideo.data.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 @Serializable
 data class SubtitleCue(
@@ -8,7 +9,8 @@ data class SubtitleCue(
     val startTimeMs: Long,
     val endTimeMs: Long,
     val originalText: String,
-    val translatedText: String? = null
+    val translatedText: String? = null,
+    @Transient val runtimeTranslation: Boolean = false
 )
 
 enum class SubtitleFormat(val extension: String) {

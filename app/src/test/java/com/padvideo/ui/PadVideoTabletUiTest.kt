@@ -63,6 +63,12 @@ class PadVideoTabletUiTest {
         composeRule.onNodeWithText("Interstellar.2014.1080p.mp4").assertIsDisplayed()
         composeRule.onNodeWithText("外挂字幕×1").assertIsDisplayed()
 
+        composeRule.onNodeWithText("网络").performClick()
+        composeRule.onNodeWithText("连接 SMB").assertIsDisplayed()
+        composeRule.onNodeWithText("播放网络地址").assertIsDisplayed()
+        composeRule.onNodeWithText("本地").performClick()
+        composeRule.onNodeWithText("Interstellar.2014.1080p.mp4").assertIsDisplayed()
+
         // 3. Switch to History & Stream tab and launch the Sintel Demo Stream with Bilingual Translation
         composeRule.onNodeWithText("历史与串流").performClick()
         composeRule.onNodeWithText("网络串流直连播放").assertIsDisplayed()

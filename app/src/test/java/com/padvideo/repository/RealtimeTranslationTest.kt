@@ -150,4 +150,45 @@ class RealtimeTranslationTest {
         assertEquals("抓紧时间，科布先生。", updates[1])
         assertEquals("梦境正在崩塌！", updates[2])
     }
+    @Test
+    fun `offline same language completes without a model or cloud request`() = runTest {
+        val repo = RealtimeTranslationRepository()
+        val config = TranslationConfig(
+            engine = TranslationEngineType.MLKIT_OFFLINE,
+            sourceLanguageCode = "en",
+            targetLanguage = TranslationLanguage.EN
+        )
+
+        repo.downloadOfflinePair(config).getOrThrow()
+        assertEquals("Hello", repo.translateSingle("Hello", config).getOrThrow())
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `prepare offline models requires an explicit source language`() = runTest {
+        val repo = RealtimeTranslationRepository()
+        val config = TranslationConfig(engine = TranslationEngineType.MLKIT_OFFLINE)
+
+        assertTrue(repo.downloadOfflinePair(config).exceptionOrNull() is IllegalArgumentException)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `failed lookahead reports the failure without publishing translations`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(503))
+        val repo = RealtimeTranslationRepository(googleGtxUrl = server.url("/gtx").toString())
+        val config = TranslationConfig(engine = TranslationEngineType.GOOGLE_GTX)
+        val updates = mutableMapOf<Int, String>()
+
+        val result = repo.translateCueWindow(
+            cues = listOf(SubtitleCue(1, 0, 1000, "First line")),
+            startIndex = 0,
+            config = config,
+            onUpdatedCues = updates::putAll
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(updates.isEmpty())
+    }
+
 }

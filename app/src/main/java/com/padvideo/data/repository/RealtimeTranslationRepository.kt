@@ -1,17 +1,23 @@
 package com.padvideo.data.repository
 
+import android.util.AtomicFile
 import android.util.LruCache
 import com.google.mlkit.common.model.DownloadConditions
-import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.common.MlKitException
+import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
-import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import com.padvideo.data.model.SubtitleCue
 import com.padvideo.data.model.TranslationConfig
 import com.padvideo.data.model.TranslationEngineType
 import com.padvideo.data.model.TranslationLanguage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -33,11 +39,16 @@ class RealtimeTranslationRepository(
     private val myMemoryUrl: String = "https://api.mymemory.translated.net/get"
 ) {
 
+    private val languageIdentifier by lazy { LanguageIdentification.getClient() }
+    private val offlineLock = Mutex()
+    private var offlineClient: Translator? = null
+    private var offlineLanguagePair: Pair<String, String>? = null
     private val json = Json { ignoreUnknownKeys = true }
     private val memoryCache = LruCache<String, String>(2048)
-    private val diskCacheMap = mutableMapOf<String, String>()
+    private val diskCacheMap = linkedMapOf<String, String>()
     private val cacheLock = Any()
-    private val diskCacheFile: File? = cacheDirectory?.let { File(it, "translation_lru_cache.json") }
+    private val diskWriteLock = Any()
+    private val diskCacheFile = cacheDirectory?.let { AtomicFile(File(it, "translation_lru_cache.json")) }
 
     init {
         loadDiskCache()
@@ -45,9 +56,9 @@ class RealtimeTranslationRepository(
 
     private fun loadDiskCache() {
         val file = diskCacheFile ?: return
-        if (!file.exists()) return
+        if (!file.baseFile.exists()) return
         runCatching {
-            val map = json.decodeFromString<Map<String, String>>(file.readText())
+            val map = json.decodeFromString<Map<String, String>>(file.readFully().toString(Charsets.UTF_8))
             synchronized(cacheLock) {
                 diskCacheMap.putAll(map)
                 map.forEach { (k, v) -> memoryCache.put(k, v) }
@@ -57,25 +68,36 @@ class RealtimeTranslationRepository(
 
     private fun persistDiskCacheSnapshot() {
         val file = diskCacheFile ?: return
-        val snapshot = synchronized(cacheLock) {
-            if (diskCacheMap.size > 1500) {
-                val keysToDrop = diskCacheMap.keys.take(diskCacheMap.size - 1200)
-                keysToDrop.forEach { diskCacheMap.remove(it) }
+        synchronized(diskWriteLock) {
+            val snapshot = synchronized(cacheLock) {
+                if (diskCacheMap.size > 1500) {
+                    val keysToDrop = diskCacheMap.keys.take(diskCacheMap.size - 1200)
+                    keysToDrop.forEach { diskCacheMap.remove(it) }
+                }
+                LinkedHashMap(diskCacheMap)
             }
-            HashMap(diskCacheMap)
-        }
-        runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(json.encodeToString(snapshot))
+            runCatching {
+                file.baseFile.parentFile?.mkdirs()
+                val output = file.startWrite()
+                try {
+                    output.write(json.encodeToString(snapshot).toByteArray(Charsets.UTF_8))
+                    file.finishWrite(output)
+                } catch (error: Exception) {
+                    file.failWrite(output)
+                    throw error
+                }
+            }
         }
     }
 
-    private fun buildCacheKey(
-        engine: TranslationEngineType,
-        sourceLang: String,
-        targetLang: String,
-        text: String
-    ): String = "${engine.name}|$sourceLang|$targetLang|${text.trim()}"
+    private fun buildCacheKey(config: TranslationConfig, text: String): String {
+        val engineKey = when (config.engine) {
+            TranslationEngineType.MLKIT_OFFLINE -> "MLKIT_OFFLINE_V2"
+            TranslationEngineType.OPENAI_COMPATIBLE -> "${config.engine.name}|${config.openAiBaseUrl}|${config.openAiModel}"
+            else -> config.engine.name
+        }
+        return "$engineKey|${config.sourceLanguageCode}|${config.targetLanguage.isoCode}|${text.trim()}"
+    }
 
     fun getCachedTranslation(
         text: String,
@@ -83,20 +105,18 @@ class RealtimeTranslationRepository(
     ): String? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return ""
-        val key = buildCacheKey(config.engine, config.sourceLanguageCode, config.targetLanguage.isoCode, trimmed)
+        val key = buildCacheKey(config, trimmed)
         return synchronized(cacheLock) { memoryCache.get(key) ?: diskCacheMap[key] }
     }
 
     private fun putCache(
-        engine: TranslationEngineType,
-        sourceLang: String,
-        targetLang: String,
+        config: TranslationConfig,
         originalText: String,
         translatedText: String
     ) {
         val trimmed = originalText.trim()
         if (trimmed.isEmpty() || translatedText.isBlank()) return
-        val key = buildCacheKey(engine, sourceLang, targetLang, trimmed)
+        val key = buildCacheKey(config, trimmed)
         synchronized(cacheLock) {
             memoryCache.put(key, translatedText)
             diskCacheMap[key] = translatedText
@@ -161,12 +181,14 @@ class RealtimeTranslationRepository(
             }
         }
 
+        coroutineContext.ensureActive()
+        fetchedResult.exceptionOrNull()?.let { if (it is CancellationException) throw it }
         fetchedResult.map { translatedList ->
             uncachedIndices.forEachIndexed { localIdx, originalIdx ->
                 val trans = translatedList.getOrNull(localIdx)?.trim().orEmpty()
                 results[originalIdx] = trans.ifEmpty { texts[originalIdx] }
                 if (trans.isNotEmpty()) {
-                    putCache(config.engine, sourceCode, targetIso, uncachedTexts[localIdx], trans)
+                    putCache(config, uncachedTexts[localIdx], trans)
                 }
             }
             persistDiskCacheSnapshot()
@@ -174,40 +196,27 @@ class RealtimeTranslationRepository(
         }
     }
 
-    /**
-     * Translates a window of upcoming cues ahead of the playhead and invokes [onProgress] per chunk.
-     */
     suspend fun translateCueWindow(
         cues: List<SubtitleCue>,
         startIndex: Int,
         windowSize: Int = 20,
         config: TranslationConfig,
         onUpdatedCues: (Map<Int, String>) -> Unit
-    ) {
-        if (cues.isEmpty() || startIndex !in cues.indices) return
+    ): Result<Unit> {
+        if (startIndex !in cues.indices) return Result.success(Unit)
         val endExclusive = (startIndex + windowSize).coerceAtMost(cues.size)
-        val slice = cues.subList(startIndex, endExclusive)
+        val pending = cues.subList(startIndex, endExclusive)
             .filter { it.translatedText.isNullOrBlank() && it.originalText.isNotBlank() }
 
-        if (slice.isEmpty()) return
-
-        // Translate in compact chunks of 8 cues for fast progressive UI updates
-        slice.chunked(8).forEach { chunk ->
-            val texts = chunk.map { it.originalText.replace('\n', ' ') }
-            val batchResult = translateBatch(texts, config)
-            batchResult.onSuccess { translated ->
-                val updates = mutableMapOf<Int, String>()
-                chunk.forEachIndexed { i, cue ->
-                    val tr = translated.getOrNull(i)?.trim()
-                    if (!tr.isNullOrBlank()) {
-                        updates[cue.index] = tr
-                    }
-                }
-                if (updates.isNotEmpty()) {
-                    onUpdatedCues(updates)
-                }
-            }
+        for (chunk in pending.chunked(if (config.engine == TranslationEngineType.MLKIT_OFFLINE) 2 else 8)) {
+            val batch = translateBatch(chunk.map { it.originalText.replace('\n', ' ') }, config)
+            val translations = batch.getOrElse { return Result.failure(it) }
+            val updates = chunk.zip(translations).mapNotNull { (cue, text) ->
+                text.trim().takeIf { it.isNotEmpty() }?.let { cue.index to it }
+            }.toMap()
+            if (updates.isNotEmpty()) onUpdatedCues(updates)
         }
+        return Result.success(Unit)
     }
 
     private fun translateViaGoogleGtx(
@@ -317,47 +326,65 @@ class RealtimeTranslationRepository(
         sourceLang: String,
         targetLang: TranslationLanguage
     ): List<String> {
-        val sampleText = texts.joinToString(" ")
         val resolvedSource = if (sourceLang == "auto" || sourceLang.isBlank()) {
-            detectHeuristicLanguage(sampleText, targetLang.mlKitCode).substringBefore('-')
+            val sample = texts.joinToString(" ")
+            val detected = languageIdentifier.identifyLanguage(sample).await()
+            if (detected == "und") detectHeuristicLanguage(sample, targetLang.mlKitCode) else detected
         } else {
-            sourceLang.substringBefore('-')
+            sourceLang
         }
-        val mlSource = TranslateLanguage.fromLanguageTag(resolvedSource) ?: TranslateLanguage.ENGLISH
-        val mlTarget = TranslateLanguage.fromLanguageTag(targetLang.mlKitCode) ?: TranslateLanguage.CHINESE
+        val source = mlKitLanguage(resolvedSource)
+        val target = targetLang.mlKitCode
+        if (source == target) return texts
 
-        val options = TranslatorOptions.Builder()
-            .setSourceLanguage(mlSource)
-            .setTargetLanguage(mlTarget)
-            .build()
-        val translator = Translation.getClient(options)
-        return try {
-            val conditions = DownloadConditions.Builder().build()
-            translator.downloadModelIfNeeded(conditions).await()
-            texts.map { line -> translator.translate(line).await() }
-        } finally {
-            translator.close()
+        return offlineLock.withLock {
+            val translator = offlineTranslator(source, target)
+            try {
+                texts.map { translator.translate(it).await() }
+            } catch (error: MlKitException) {
+                if (error.errorCode != MlKitException.NOT_FOUND) throw error
+                throw IllegalStateException("请联网下载 ${source} → ${target} 离线模型后重试", error)
+            }
         }
     }
 
-    suspend fun isOfflineModelDownloaded(lang: TranslationLanguage): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
-            val code = TranslateLanguage.fromLanguageTag(lang.mlKitCode) ?: return@runCatching false
-            val model = TranslateRemoteModel.Builder(code).build()
-            RemoteModelManager.getInstance().isModelDownloaded(model).await()
-        }.getOrDefault(false)
+    // Keep one warm translator so adjacent captions can reuse the loaded model.
+    private fun offlineTranslator(source: String, target: String): Translator {
+        val pair = source to target
+        if (offlineLanguagePair == pair) offlineClient?.let { return it }
+
+        val translator = createTranslator(source, target)
+        offlineClient?.close()
+        offlineClient = translator
+        offlineLanguagePair = pair
+        return translator
     }
 
-    suspend fun downloadOfflineModel(lang: TranslationLanguage): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun downloadOfflinePair(config: TranslationConfig): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val code = TranslateLanguage.fromLanguageTag(lang.mlKitCode)
-                ?: throw IllegalArgumentException("Unsupported ML Kit language: ${lang.mlKitCode}")
-            val model = TranslateRemoteModel.Builder(code).build()
-            val conditions = DownloadConditions.Builder().build()
-            RemoteModelManager.getInstance().download(model, conditions).await()
+            require(config.sourceLanguageCode != "auto") { "请先手动选择视频源语言" }
+            val source = mlKitLanguage(config.sourceLanguageCode)
+            val target = config.targetLanguage.mlKitCode
+            if (source != target) {
+                offlineLock.withLock {
+                    offlineTranslator(source, target)
+                        .downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
+                }
+            }
             Unit
+        }.also { result ->
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
         }
     }
+
+    private fun mlKitLanguage(tag: String): String =
+        TranslateLanguage.fromLanguageTag(tag.substringBefore('-'))
+            ?: throw IllegalArgumentException("端侧翻译暂不支持该源语言（$tag），请手动选择")
+
+    private fun createTranslator(source: String, target: String): Translator =
+        Translation.getClient(
+            TranslatorOptions.Builder().setSourceLanguage(source).setTargetLanguage(target).build()
+        )
 
     private fun translateViaOpenAiCompatible(
         texts: List<String>,

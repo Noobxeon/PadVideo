@@ -24,6 +24,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.datasource.DataSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import com.padvideo.data.repository.SmbRepository
 import androidx.media3.session.MediaSession
 import com.padvideo.data.model.AudioTrackOption
 import com.padvideo.data.model.SubtitleTrackOption
@@ -36,8 +39,9 @@ import java.io.File
 import java.util.Locale
 
 @OptIn(UnstableApi::class)
-class PadPlayerController(
+class PadPlayerController internal constructor(
     private val context: Context,
+    private val smbRepository: SmbRepository,
     preferHardwareDecoder: Boolean = true
 ) {
 
@@ -237,7 +241,13 @@ class PadPlayerController(
             )
             .build()
 
-        exoPlayer.setMediaItem(mediaItem, startPositionMs.coerceAtLeast(0L))
+        val startPosition = startPositionMs.coerceAtLeast(0L)
+        if (mediaItem.localConfiguration?.uri?.scheme == "smb") {
+            val source = ProgressiveMediaSource.Factory(DataSource.Factory { SmbDataSource(smbRepository) })
+            exoPlayer.setMediaSource(source.createMediaSource(mediaItem), startPosition)
+        } else {
+            exoPlayer.setMediaItem(mediaItem, startPosition)
+        }
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
     }
