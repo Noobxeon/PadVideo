@@ -7,9 +7,12 @@ import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.session.Session
 import com.hierynomus.smbj.share.DiskShare
 import com.hierynomus.smbj.share.File
 import com.padvideo.data.model.VideoItem
+import com.rapid7.client.dcerpc.mssrvs.ServerService
+import com.rapid7.client.dcerpc.transport.SMBTransportFactories
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -47,7 +50,7 @@ internal class SmbRepository {
             id = location.uri,
             title = name,
             uriString = location.uri,
-            folderName = location.segments.dropLast(1).lastOrNull() ?: location.share,
+            folderName = location.segments.dropLast(1).lastOrNull() ?: checkNotNull(location.share),
             folderPath = location.parent().uri,
             sizeBytes = size
         )
@@ -67,38 +70,49 @@ internal class SmbRepository {
 
     suspend fun list(location: SmbLocation, credentials: Credentials? = null): List<Entry> =
         withContext(Dispatchers.IO) {
-            val root = location.copy(segments = emptyList())
-            val auth = credentials ?: sessions[root] ?: throw IOException("请重新连接 SMB 共享")
-            val entries = withShare(location, auth) { share ->
-                operation(SmbConnectionStep.BROWSE, auth, location) { share.list(location.path) }.mapNotNull { info ->
-                    val name = info.fileName
-                    if (name == "." || name == "..") return@mapNotNull null
-                    val isFolder = info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value != 0L
-                    if (!isFolder && !FileExplorerRepository.isVideoFileName(name)) {
-                        return@mapNotNull null
+            val root = location.shareRoot()
+            val auth = credentials ?: sessions[root] ?: sessions[location.serverRoot()]
+                ?: throw IOException("请重新连接 SMB 共享")
+            val entries = withSession(location, auth) { session ->
+                val shareName = location.share
+                if (shareName == null) {
+                    operation(SmbConnectionStep.LIST_SHARES, auth, location) {
+                        val transport = SMBTransportFactories.SRVSVC.getTransport(session)
+                        ServerService(transport).getShares1()
+                            .filter { it.type == 0 && !it.netName.endsWith('$') && SmbLocation.isPathSegment(it.netName) }
+                            .map { Entry(it.netName, location.child(it.netName), true, 0L) }
                     }
-                    Entry(name, location.child(name), isFolder, info.endOfFile)
-                }.sortedWith(compareBy<Entry> { !it.isFolder }.thenComparator { a, b ->
-                    FileExplorerRepository.compareNaturalStrings(a.name, b.name)
-                })
+                } else {
+                    operation(SmbConnectionStep.SHARE, auth, location) {
+                        session.connectShare(shareName) as? DiskShare
+                            ?: throw IOException("SMB share is not a disk share")
+                    }.use { share ->
+                        operation(SmbConnectionStep.BROWSE, auth, location) {
+                            share.list(location.path).mapNotNull { info ->
+                                val name = info.fileName
+                                if (!SmbLocation.isPathSegment(name)) return@mapNotNull null
+                                val isFolder = info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value != 0L
+                                if (!isFolder && !FileExplorerRepository.isVideoFileName(name)) return@mapNotNull null
+                                Entry(name, location.child(name), isFolder, info.endOfFile)
+                            }
+                        }
+                    }
+                }
             }
             sessions[root] = auth
-            entries
+            entries.sortedWith(compareBy<Entry> { !it.isFolder }.thenComparator { a, b ->
+                FileExplorerRepository.compareNaturalStrings(a.name, b.name)
+            })
         }
 
-    private fun <T> withShare(location: SmbLocation, auth: Credentials, action: (DiskShare) -> T): T =
+    private fun <T> withSession(location: SmbLocation, auth: Credentials, action: (Session) -> T): T =
         client(auth).use { client ->
             operation(SmbConnectionStep.CONNECT, auth, location) {
                 client.connect(location.host.removeSurrounding("[", "]"), location.port)
             }.use { connection ->
                 operation(SmbConnectionStep.AUTHENTICATE, auth, location) {
                     connection.authenticate(auth.context)
-                }.use { session ->
-                    operation(SmbConnectionStep.SHARE, auth, location) {
-                        session.connectShare(location.share) as? DiskShare
-                            ?: throw IOException("SMB share is not a disk share")
-                    }.use(action)
-                }
+                }.use(action)
             }
         }
 
@@ -116,7 +130,8 @@ internal class SmbRepository {
     }
 
     fun open(location: SmbLocation): OpenFile {
-        val credentials = sessions[location.copy(segments = emptyList())]
+        val shareName = location.share ?: throw IOException("请选择 SMB 共享中的视频")
+        val credentials = sessions[location.shareRoot()]
             ?: throw IOException("请在文件页重新连接 SMB 共享")
         val resources = mutableListOf<AutoCloseable>()
         try {
@@ -124,7 +139,7 @@ internal class SmbRepository {
             val connection = client.connect(location.host.removeSurrounding("[", "]"), location.port)
                 .also { resources.add(it) }
             val session = connection.authenticate(credentials.context).also { resources.add(it) }
-            val share = (session.connectShare(location.share) as DiskShare).also { resources.add(it) }
+            val share = (session.connectShare(shareName) as DiskShare).also { resources.add(it) }
             val file = share.openFile(
                 location.path, setOf(AccessMask.GENERIC_READ), null, SMB2ShareAccess.ALL,
                 SMB2CreateDisposition.FILE_OPEN, null
