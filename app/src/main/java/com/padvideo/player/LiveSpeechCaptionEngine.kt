@@ -2,6 +2,7 @@ package com.padvideo.player
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -34,7 +35,8 @@ class LiveSpeechCaptionEngine(
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
 
-    fun start(sourceLanguageCode: String = "en-US") {
+    fun start(sourceLanguageCode: String, offline: Boolean) {
+        stop()
         recognitionLangTag = when (sourceLanguageCode.lowercase()) {
             "auto", "en" -> "en-US"
             "ja" -> "ja-JP"
@@ -46,85 +48,96 @@ class LiveSpeechCaptionEngine(
             "ru" -> "ru-RU"
             else -> sourceLanguageCode
         }
-        mainHandler.post {
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                _statusMessage.value = "当前设备未安装系统语音识别服务，建议使用在线字幕搜索"
-                _isListening.value = false
-                return@post
-            }
-            shouldContinueListening = true
-            _isListening.value = true
-            _statusMessage.value = "实时语音同传监听中 ($recognitionLangTag)…"
-            ensureRecognizerAndListen()
+        val canRecognize = if (offline) {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+        } else {
+            SpeechRecognizer.isRecognitionAvailable(context)
         }
-    }
-
-    fun stop() {
-        shouldContinueListening = false
-        mainHandler.post {
-            _isListening.value = false
-            _partialTranscript.value = ""
-            _statusMessage.value = null
-            runCatching {
-                recognizer?.stopListening()
-                recognizer?.cancel()
-                recognizer?.destroy()
-            }
-            recognizer = null
+        if (!canRecognize) {
+            _statusMessage.value = if (offline) "此设备没有可用的端侧语音识别服务，仍可离线翻译字幕"
+            else "当前设备没有可用的系统语音识别服务"
+            return
         }
-    }
 
-    private fun ensureRecognizerAndListen() {
-        if (!shouldContinueListening) return
-        if (recognizer == null) {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+        recognizer = try {
+            val instance = if (offline && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(context)
+            }
+            instance.apply {
                 setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        _statusMessage.value = "正在聆听视频原声…"
-                    }
-
+                    override fun onReadyForSpeech(params: Bundle?) {}
                     override fun onBeginningOfSpeech() {}
                     override fun onRmsChanged(rmsdB: Float) {}
                     override fun onBufferReceived(buffer: ByteArray?) {}
                     override fun onEndOfSpeech() {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
 
                     override fun onError(error: Int) {
-                        if (shouldContinueListening) {
-                            mainHandler.postDelayed({ ensureRecognizerAndListen() }, 450L)
+                        if (recognizer !== instance || !shouldContinueListening) return
+                        _partialTranscript.value = ""
+                        when (error) {
+                            SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+                                mainHandler.postDelayed({ listen() }, 450L)
+                            else -> {
+                                stop()
+                                _statusMessage.value = if (offline) "端侧语音识别失败，请检查系统语音识别服务和已安装的语音模型"
+                                else "语音识别失败，请检查麦克风权限和系统语音识别服务"
+                            }
                         }
                     }
 
                     override fun onResults(results: Bundle?) {
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val best = matches?.firstOrNull()?.trim().orEmpty()
+                        if (recognizer !== instance || !shouldContinueListening) return
+                        val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()?.trim().orEmpty()
                         _partialTranscript.value = ""
-                        if (best.isNotEmpty()) {
-                            onSegmentRecognized(best)
-                        }
-                        if (shouldContinueListening) {
-                            mainHandler.postDelayed({ ensureRecognizerAndListen() }, 180L)
-                        }
+                        if (best.isNotEmpty()) onSegmentRecognized(best)
+                        mainHandler.postDelayed({ listen() }, 180L)
                     }
 
                     override fun onPartialResults(partialResults: Bundle?) {
-                        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val partial = matches?.firstOrNull()?.trim().orEmpty()
-                        if (partial.isNotEmpty()) {
-                            _partialTranscript.value = partial
-                        }
+                        if (recognizer !== instance || !shouldContinueListening) return
+                        _partialTranscript.value = partialResults
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()?.trim().orEmpty()
                     }
-
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
                 })
             }
+        } catch (error: RuntimeException) {
+            _statusMessage.value = "无法启动系统语音识别服务"
+            return
         }
+        shouldContinueListening = true
+        _isListening.value = true
+        _statusMessage.value = "正在通过麦克风识别语音"
+        listen()
+    }
 
+    fun stop() {
+        shouldContinueListening = false
+        mainHandler.removeCallbacksAndMessages(null)
+        _isListening.value = false
+        _partialTranscript.value = ""
+        _statusMessage.value = null
+        val previous = recognizer
+        recognizer = null
+        runCatching { previous?.cancel() }
+        runCatching { previous?.destroy() }
+    }
+
+    private fun listen() {
+        if (!shouldContinueListening) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLangTag)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
-        runCatching { recognizer?.startListening(intent) }
+        runCatching { recognizer?.startListening(intent) }.onFailure {
+            stop()
+            _statusMessage.value = "无法启动语音识别，请检查系统语音识别服务"
+        }
     }
 }
