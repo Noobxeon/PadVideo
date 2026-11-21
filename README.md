@@ -14,7 +14,7 @@
 ### 2. 全功能平板文件浏览器与视频媒体库
 - **双模浏览**：既提供自动聚合分辨率标签（`4K UHD` / `1080P`）、缩略图缓存与观看进度条的 **智能媒体库**，也提供完整的 **层级目录文件浏览器**。
 - **本地浏览**：支持内部存储快捷跳转、交互式路径面包屑导航、目录收藏夹、自然数字剧集排序（`Episode 2` 排在 `Episode 10` 之前）、搜索过滤，以及通过 **SAF 目录树挂载 USB-C U盘 / 移动硬盘** 与系统级「打开方式」直连播放。
-- **网络浏览**：在「文件浏览 → 网络」输入 `smb://服务器/共享目录`，可选填账号、密码和域。支持 SMB 2/3 共享的目录浏览、过滤、直接播放、拖动进度与同目录选集。账号和密码保存在当前应用进程中。网络页也能打开 HTTP、HTTPS 和 RTSP 视频地址。
+- **网络浏览**：在「文件浏览 → 网络」输入电脑 IP 或主机名浏览共享列表，或输入 `smb://服务器/共享目录` 直接打开指定共享。可选填账号、密码和域。支持 SMB 2/3 共享的目录浏览、过滤、直接播放、拖动进度与同目录选集。账号和密码保存在当前应用进程中。网络页也能打开 HTTP、HTTPS 和 RTSP 视频地址。
 - **连接 Windows 共享**：可以直接粘贴资源管理器里的 `\\PC\Movies`，也可以用 `smb://192.168.1.20/Movies`。本地账号可填 `PC\用户名`，使用该账号的密码。Windows Hello PIN 用于本机登录；网络共享使用账号密码。填写了账号前缀时，域可留空。
 - **外挂字幕自动关联**：打开视频时自动扫描并挂载同目录下同名 `.srt` / `.ass` / `.ssa` / `.vtt` 外挂字幕文件。
 
@@ -96,7 +96,7 @@ bash gradlew assembleDebug assembleRelease
 - Debug APK: `app/build/outputs/apk/debug/app-debug.apk`
 - Release APK: `app/build/outputs/apk/release/app-release.apk`
 
-从 v1.0.0 更新到 v1.1.x 时需先卸载旧版，卸载会清除旧版的应用内设置和观看记录。v1.1.1 与 v1.1.0 使用同一张发布证书，可覆盖安装。
+从 v1.0.0 更新到 v1.1.x 时需先卸载旧版，卸载会清除旧版的应用内设置和观看记录。v1.1.x 各版本使用同一张发布证书，可覆盖安装。
 
 在 GitHub Actions 发布时，通过仓库 Secrets 配置 `PADVIDEO_KEYSTORE_BASE64`、`PADVIDEO_STORE_PASSWORD`、`PADVIDEO_KEY_ALIAS` 和 `PADVIDEO_KEY_PASSWORD`。在 `main` 运行 Android CI 并勾选 `publish` 后，工作流会先测试，再验证 APK 签名并发布。
 
