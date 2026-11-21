@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
@@ -24,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.padvideo.data.model.formatFileSize
@@ -34,7 +36,7 @@ import java.net.URI
 @Composable
 internal fun NetworkBrowserScreen(
     state: NetworkBrowserState,
-    onConnect: (String, SmbRepository.Credentials) -> Unit,
+    onConnect: (String, String, String, String) -> Unit,
     onOpenEntry: (SmbRepository.Entry) -> Unit,
     onRefresh: () -> Unit,
     onUp: () -> Unit,
@@ -101,12 +103,19 @@ internal fun NetworkBrowserScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedTextField(
                         address, { address = it }, singleLine = true,
-                        label = { Text("共享地址") }, placeholder = { Text("smb://nas/Movies") }
+                        label = { Text("共享地址") }, placeholder = { Text("smb://192.168.1.20/Movies") }
                     )
-                    OutlinedTextField(user, { user = it }, singleLine = true, label = { Text("账号（留空为访客）") })
+                    OutlinedTextField(
+                        user, { user = it }, singleLine = true,
+                        label = { Text("账号（留空为访客）") },
+                        placeholder = { Text("电脑名\\用户名") }
+                    )
                     OutlinedTextField(
                         password, { password = it }, singleLine = true,
-                        label = { Text("密码") }, visualTransformation = PasswordVisualTransformation()
+                        label = { Text("账号密码") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                        supportingText = { Text("Windows 共享使用账号密码。") }
                     )
                     OutlinedTextField(domain, { domain = it }, singleLine = true, label = { Text("域（可选）") })
                 }
@@ -116,7 +125,7 @@ internal fun NetworkBrowserScreen(
                     enabled = address.isNotBlank(),
                     onClick = {
                         search = ""
-                        onConnect(address, SmbRepository.Credentials(user, password, domain))
+                        onConnect(address, user, password, domain)
                         showConnect = false
                     }
                 ) { Text("连接") }
