@@ -2,6 +2,7 @@ package com.padvideo.ui
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -18,7 +19,7 @@ import com.padvideo.data.model.SubtitleCue
 import com.padvideo.data.model.SubtitleStyleConfig
 import com.padvideo.data.model.TranslationConfig
 import com.padvideo.data.model.TranslationDisplayMode
-import com.padvideo.data.model.TranslationLanguage
+import com.padvideo.data.model.TranslationEngineType
 import com.padvideo.data.model.VideoBookmark
 import com.padvideo.data.model.VideoItem
 import com.padvideo.data.model.formatDurationMs
@@ -27,6 +28,7 @@ import com.padvideo.player.LiveSpeechCaptionEngine
 import com.padvideo.player.PadPlayerController
 import com.padvideo.subtitle.SubtitleParser
 import com.padvideo.subtitle.VideoFilenameParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -67,6 +70,7 @@ data class PlayerUiState(
     val displayPrimaryLine: String = "",
     val displaySecondaryLine: String = "",
     val isTranslatingNow: Boolean = false,
+    val translationError: String? = null,
     val showTranscriptDrawer: Boolean = false,
     val snackbarMessage: String? = null,
     // Online Subtitle Search Sheet State
@@ -87,6 +91,7 @@ class PlayerViewModel(
 
     val playerController = PadPlayerController(
         context = appContext,
+        smbRepository = container.smbRepository,
         preferHardwareDecoder = settings.value.hardwareDecoderPreferred
     )
 
@@ -102,7 +107,9 @@ class PlayerViewModel(
     private var lookaheadTranslationJob: Job? = null
     private var embeddedCueTranslationJob: Job? = null
     private var sleepTimerJob: Job? = null
-    private var lastTranslatedWindowStart: Int = -999
+    private var lastTranslatedWindowStart = -1
+    private var lookaheadRetryAtMs = 0L
+    private var playbackGeneration = 0
     private var preLongPressSpeed: Float = 1.0f
     private var cumulativeDoubleTapMs: Long = 0L
     private var lastDoubleTapTimestamp: Long = 0L
@@ -153,8 +160,17 @@ class PlayerViewModel(
         }
 
         viewModelScope.launch {
+            liveSpeechEngine.statusMessage.collect { message ->
+                if (message != null && settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+                    postMessage(message)
+                }
+            }
+        }
+
+        viewModelScope.launch {
             liveSpeechEngine.partialTranscript.collect { partial ->
-                if (settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL &&
+                if (_uiState.value.subtitlesEnabled &&
+                    settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL &&
                     partial.isNotBlank()
                 ) {
                     _uiState.update {
@@ -181,6 +197,9 @@ class PlayerViewModel(
     }
 
     fun startLaunch(launch: ActivePlaybackLaunch) {
+        playbackGeneration++
+        liveSpeechEngine.stop()
+        resetTranslationWork()
         val video = launch.video
         val playlist = launch.playlist.ifEmpty { listOf(video) }
         val index = playlist.indexOfFirst { it.uriString == video.uriString }.coerceAtLeast(0)
@@ -209,8 +228,6 @@ class PlayerViewModel(
                 onlineQuery = cleanedQuery
             )
         }
-        lastTranslatedWindowStart = -999
-
         playerController.loadVideo(video.uriString, video.title, resumeMs)
         playerController.setPlaybackSpeed(initialSpeed)
 
@@ -260,6 +277,7 @@ class PlayerViewModel(
 
     private fun updateActiveSubtitleAtPosition(positionMs: Long) {
         val state = _uiState.value
+        if (state.currentVideo == null) return
         if (!state.subtitlesEnabled) {
             if (state.displayPrimaryLine.isNotEmpty() || state.displaySecondaryLine.isNotEmpty()) {
                 _uiState.update { it.copy(displayPrimaryLine = "", displaySecondaryLine = "", activeCueIndex = -1) }
@@ -278,9 +296,7 @@ class PlayerViewModel(
         if (transConfig.displayMode == TranslationDisplayMode.BILINGUAL ||
             transConfig.displayMode == TranslationDisplayMode.TARGET_ONLY
         ) {
-            if (nearestIdx >= 0 && (nearestIdx < lastTranslatedWindowStart || nearestIdx >= lastTranslatedWindowStart + 6)) {
-                triggerLookaheadTranslation(nearestIdx)
-            }
+            if (nearestIdx >= 0) triggerLookaheadTranslation(nearestIdx)
         }
 
         if (activeCues.isEmpty()) {
@@ -312,67 +328,86 @@ class PlayerViewModel(
     }
 
     private fun handleLiveEmbeddedCueUpdate(embeddedText: String) {
-        if (!_uiState.value.subtitlesEnabled) return
+        embeddedCueTranslationJob?.cancel()
+        val state = _uiState.value
+        if (state.currentVideo == null || !state.subtitlesEnabled || state.externalCues.isNotEmpty()) return
         val cleaned = SubtitleParser.cleanSubtitleText(embeddedText)
-        if (cleaned.isEmpty()) {
-            _uiState.update { it.copy(displayPrimaryLine = "", displaySecondaryLine = "") }
-            return
-        }
-
         val transConfig = settings.value.translationConfig
-        if (transConfig.displayMode == TranslationDisplayMode.OFF) {
-            _uiState.update { it.copy(displayPrimaryLine = cleaned, displaySecondaryLine = "") }
+        if (transConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) return
+        if (cleaned.isEmpty() || transConfig.displayMode == TranslationDisplayMode.OFF) {
+            _uiState.update {
+                it.copy(displayPrimaryLine = cleaned, displaySecondaryLine = "", isTranslatingNow = false)
+            }
             return
         }
 
         val cached = container.translationRepository.getCachedTranslation(cleaned, transConfig)
         if (cached != null) {
             val (primary, secondary) = formatDisplayLines(cleaned, cached, transConfig.displayMode)
-            _uiState.update { it.copy(displayPrimaryLine = primary, displaySecondaryLine = secondary) }
+            _uiState.update {
+                it.copy(
+                    displayPrimaryLine = primary, displaySecondaryLine = secondary,
+                    isTranslatingNow = false, translationError = null
+                )
+            }
             return
         }
 
         // Show original immediately while fetching live translation
-        _uiState.update { it.copy(displayPrimaryLine = cleaned, displaySecondaryLine = "正在实时翻译…", isTranslatingNow = true) }
-        embeddedCueTranslationJob?.cancel()
+        _uiState.update {
+            it.copy(displayPrimaryLine = cleaned, displaySecondaryLine = "", isTranslatingNow = true)
+        }
         embeddedCueTranslationJob = viewModelScope.launch {
             val result = container.translationRepository.translateSingle(cleaned, transConfig)
-            val translated = result.getOrDefault("")
-            val (primary, secondary) = formatDisplayLines(cleaned, translated, transConfig.displayMode)
+            val (primary, secondary) = formatDisplayLines(cleaned, result.getOrDefault(""), transConfig.displayMode)
             _uiState.update {
                 it.copy(
                     displayPrimaryLine = primary,
                     displaySecondaryLine = secondary,
-                    isTranslatingNow = false
+                    isTranslatingNow = false,
+                    translationError = result.exceptionOrNull()?.let { error -> translationError(transConfig, error) }
                 )
             }
         }
     }
 
     private fun onLiveSpeechSegment(spokenText: String) {
+        val state = _uiState.value
+        val config = settings.value.translationConfig
+        if (state.currentVideo == null || config.displayMode != TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) return
+
+        val generation = playbackGeneration
         val pos = playerController.exoPlayer.currentPosition.coerceAtLeast(0L)
-        val transConfig = settings.value.translationConfig
+        val cue = SubtitleCue(
+            index = (state.externalCues.maxOfOrNull { it.index } ?: 0) + 1,
+            startTimeMs = (pos - 2800L).coerceAtLeast(0L),
+            endTimeMs = pos + 2500L,
+            originalText = spokenText
+        )
+        _uiState.update { it.copy(externalCues = (it.externalCues + cue).sortedBy { line -> line.startTimeMs }) }
         viewModelScope.launch {
-            _uiState.update { it.copy(isTranslatingNow = true) }
-            val translated = container.translationRepository.translateSingle(spokenText, transConfig).getOrDefault("")
-            val newCue = SubtitleCue(
-                index = _uiState.value.externalCues.size + 1,
-                startTimeMs = (pos - 2800L).coerceAtLeast(0L),
-                endTimeMs = pos + 2500L,
-                originalText = spokenText,
-                translatedText = translated.ifBlank { null }
-            )
-            _uiState.update { state ->
-                val updatedList = state.externalCues + newCue
-                state.copy(
-                    externalCues = updatedList,
-                    displayPrimaryLine = translated.ifBlank { spokenText },
-                    displaySecondaryLine = if (translated.isNotBlank()) spokenText else "",
-                    isTranslatingNow = false
+            val result = container.translationRepository.translateSingle(spokenText, config)
+            if (generation != playbackGeneration || config != settings.value.translationConfig) return@launch
+            _uiState.update { current ->
+                current.copy(
+                    externalCues = current.externalCues.map { line ->
+                        if (line === cue) line.copy(
+                            translatedText = result.getOrNull(), runtimeTranslation = true
+                        ) else line
+                    },
+                    translationError = result.exceptionOrNull()?.let { error -> translationError(config, error) }
                 )
             }
         }
     }
+
+    private fun translationError(config: TranslationConfig, error: Throwable): String =
+        if (config.engine == TranslationEngineType.MLKIT_OFFLINE) {
+            error.message?.takeIf { it.startsWith("请") || it.startsWith("端侧") }
+                ?: "离线翻译失败，请检查源语言和离线模型"
+        } else {
+            "实时翻译失败，请检查网络或翻译引擎设置"
+        }
 
     private fun formatDisplayLines(
         originalText: String,
@@ -394,46 +429,69 @@ class PlayerViewModel(
         }
     }
 
+    private fun resetTranslationWork() {
+        lookaheadTranslationJob?.cancel()
+        embeddedCueTranslationJob?.cancel()
+        lastTranslatedWindowStart = -1
+        lookaheadRetryAtMs = 0L
+        _uiState.update { it.copy(isTranslatingNow = false, translationError = null) }
+    }
+
     private fun triggerLookaheadTranslation(startIndex: Int, force: Boolean = false) {
-        val cues = _uiState.value.externalCues
-        if (cues.isEmpty() || startIndex !in cues.indices) return
-        if (!force && startIndex == lastTranslatedWindowStart) return
-        lastTranslatedWindowStart = startIndex
+        val state = _uiState.value
+        val cues = state.externalCues
+        if (!state.subtitlesEnabled || startIndex !in cues.indices) return
 
         val config = settings.value.translationConfig
-        if (config.displayMode == TranslationDisplayMode.OFF) return
+        if (config.displayMode !in listOf(TranslationDisplayMode.BILINGUAL, TranslationDisplayMode.TARGET_ONLY)) return
 
+        val windowSize = config.lookaheadCueCount.coerceIn(8, 40)
+        val inProgress = startIndex in lastTranslatedWindowStart until lastTranslatedWindowStart + windowSize
+        if (!force && inProgress && lookaheadTranslationJob?.isActive == true) return
+        if (!force && SystemClock.elapsedRealtime() < lookaheadRetryAtMs) return
+        val end = (startIndex + windowSize).coerceAtMost(cues.size)
+        if (cues.subList(startIndex, end).none { it.translatedText.isNullOrBlank() && it.originalText.isNotBlank() }) return
+
+        lastTranslatedWindowStart = startIndex
         lookaheadTranslationJob?.cancel()
         lookaheadTranslationJob = viewModelScope.launch {
             _uiState.update { it.copy(isTranslatingNow = true) }
-            container.translationRepository.translateCueWindow(
-                cues = _uiState.value.externalCues,
+            val result = container.translationRepository.translateCueWindow(
+                cues = cues,
                 startIndex = startIndex,
-                windowSize = config.lookaheadCueCount.coerceIn(8, 40),
+                windowSize = windowSize,
                 config = config,
                 onUpdatedCues = { updatesByIndex ->
                     _uiState.update { current ->
-                        val merged = current.externalCues.map { c ->
-                            val newTr = updatesByIndex[c.index]
-                            if (newTr != null) c.copy(translatedText = newTr) else c
-                        }
-                        current.copy(externalCues = merged)
+                        current.copy(externalCues = current.externalCues.map { cue ->
+                            val translated = updatesByIndex[cue.index]
+                            if (translated == null) cue
+                            else cue.copy(translatedText = translated, runtimeTranslation = true)
+                        })
                     }
                 }
             )
-            _uiState.update { it.copy(isTranslatingNow = false) }
+            if (result.isFailure) lookaheadRetryAtMs = SystemClock.elapsedRealtime() + 4_000
+            _uiState.update {
+                it.copy(
+                    isTranslatingNow = false,
+                    translationError = result.exceptionOrNull()?.let { error -> translationError(config, error) }
+                )
+            }
         }
     }
 
     fun loadExternalSubtitleFile(file: File, silent: Boolean = false) {
         viewModelScope.launch {
-            val cues = SubtitleParser.parseFile(file)
+            val generation = playbackGeneration
+            val cues = withContext(Dispatchers.IO) { SubtitleParser.parseFile(file) }
+            if (generation != playbackGeneration) return@launch
             if (cues.isEmpty()) {
                 if (!silent) postMessage("字幕文件解析为空: ${file.name}")
                 return@launch
             }
             playerController.selectEmbeddedSubtitleTrack(null)
-            lastTranslatedWindowStart = -999
+            resetTranslationWork()
             _uiState.update {
                 it.copy(
                     externalCues = cues,
@@ -464,7 +522,7 @@ class PlayerViewModel(
                 val saved = File(cacheDir, fileName)
                 saved.writeText(SubtitleParser.exportToSrt(cues, includeTranslation = true), Charsets.UTF_8)
                 playerController.selectEmbeddedSubtitleTrack(null)
-                lastTranslatedWindowStart = -999
+                resetTranslationWork()
                 _uiState.update {
                     it.copy(
                         externalCues = cues,
@@ -570,7 +628,7 @@ class PlayerViewModel(
             )
             res.onSuccess { bundle ->
                 playerController.selectEmbeddedSubtitleTrack(null)
-                lastTranslatedWindowStart = -999
+                resetTranslationWork()
                 _uiState.update {
                     it.copy(
                         isDownloadingOnlineSub = false,
@@ -613,43 +671,59 @@ class PlayerViewModel(
     fun setTranslationDisplayMode(mode: TranslationDisplayMode) {
         updateTranslationConfig { it.copy(displayMode = mode) }
         if (mode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
-            liveSpeechEngine.start(settings.value.translationConfig.sourceLanguageCode)
-            postMessage("已开启实时语音识别双语同传")
+            startLiveSpeech(settings.value.translationConfig)
         } else {
             liveSpeechEngine.stop()
-            if (mode != TranslationDisplayMode.OFF) {
-                lastTranslatedWindowStart = -999
-                val idx = SubtitleParser.findCueIndexAtOrAfter(
-                    _uiState.value.externalCues,
-                    _uiState.value.positionMs
-                ).coerceAtLeast(0)
-                triggerLookaheadTranslation(idx, force = true)
-                postMessage("已切换为: ${mode.label}")
-            } else {
-                postMessage("已关闭实时翻译")
-            }
         }
+    }
+
+    private fun startLiveSpeech(config: TranslationConfig) {
+        liveSpeechEngine.start(
+            config.sourceLanguageCode, config.engine == TranslationEngineType.MLKIT_OFFLINE
+        )
     }
 
     fun updateTranslationConfig(transform: (TranslationConfig) -> TranslationConfig) {
-        container.settingsRepository.updateSettings { s ->
-            s.copy(translationConfig = transform(s.translationConfig))
+        val old = settings.value.translationConfig
+        val next = transform(old)
+        if (old == next) return
+        container.settingsRepository.updateSettings { it.copy(translationConfig = next) }
+
+        resetTranslationWork()
+        if (old.copy(displayMode = next.displayMode, lookaheadCueCount = next.lookaheadCueCount) != next) {
+            _uiState.update { state ->
+                state.copy(externalCues = state.externalCues.map { cue ->
+                    if (cue.runtimeTranslation) cue.copy(translatedText = null, runtimeTranslation = false) else cue
+                })
+            }
+            if (old.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL &&
+                next.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL
+            ) {
+                startLiveSpeech(next)
+            }
         }
-        lastTranslatedWindowStart = -999
-        val idx = SubtitleParser.findCueIndexAtOrAfter(_uiState.value.externalCues, _uiState.value.positionMs)
-        if (idx >= 0) {
-            triggerLookaheadTranslation(idx, force = true)
+        if (_uiState.value.externalCues.isEmpty()) {
+            handleLiveEmbeddedCueUpdate(playerController.liveEmbeddedSubtitleCue.value)
+        } else {
+            updateActiveSubtitleAtPosition(playerController.exoPlayer.currentPosition.coerceAtLeast(0L))
         }
     }
 
-    fun downloadMlKitOfflinePack(lang: TranslationLanguage, onResult: (String) -> Unit) {
+    fun downloadMlKitOfflinePack(onResult: (String) -> Unit) {
+        val config = settings.value.translationConfig
         viewModelScope.launch {
-            onResult("正在下载 ${lang.label} 离线神经翻译模型…")
-            val res = container.translationRepository.downloadOfflineModel(lang)
-            res.onSuccess {
-                onResult("${lang.label} 离线翻译包已就绪，可完全断网实时翻译")
-            }.onFailure { e ->
-                onResult("离线模型下载失败: ${e.message}")
+            container.translationRepository.downloadOfflinePair(config).onSuccess {
+                onResult("这组语言的离线模型已就绪")
+                if (settings.value.translationConfig == config) {
+                    resetTranslationWork()
+                    if (_uiState.value.externalCues.isEmpty()) {
+                        handleLiveEmbeddedCueUpdate(playerController.liveEmbeddedSubtitleCue.value)
+                    } else {
+                        updateActiveSubtitleAtPosition(playerController.exoPlayer.currentPosition.coerceAtLeast(0L))
+                    }
+                }
+            }.onFailure { error ->
+                onResult("模型下载失败：${error.message ?: "请检查网络和存储空间"}")
             }
         }
     }
@@ -954,7 +1028,13 @@ class PlayerViewModel(
 
     fun toggleSubtitlesEnabled() {
         val next = !_uiState.value.subtitlesEnabled
-        _uiState.update { it.copy(subtitlesEnabled = next) }
+        resetTranslationWork()
+        _uiState.update {
+            it.copy(subtitlesEnabled = next, displayPrimaryLine = "", displaySecondaryLine = "")
+        }
+        if (next && _uiState.value.externalCues.isEmpty()) {
+            handleLiveEmbeddedCueUpdate(playerController.liveEmbeddedSubtitleCue.value)
+        }
         postMessage(if (next) "已开启字幕显示" else "已隐藏字幕")
     }
 
@@ -1002,7 +1082,11 @@ class PlayerViewModel(
     fun stopAndSave() {
         saveCurrentPlaybackHistory()
         liveSpeechEngine.stop()
-        playerController.pause()
+        playbackGeneration++
+        resetTranslationWork()
+        _uiState.update { it.copy(currentVideo = null) }
+        playerController.exoPlayer.stop()
+        playerController.exoPlayer.clearMediaItems()
     }
 
     override fun onCleared() {
