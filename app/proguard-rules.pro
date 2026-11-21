@@ -34,3 +34,10 @@
 -dontwarn com.google.mlkit.**
 -keep class com.google.android.gms.** { *; }
 -dontwarn com.google.android.gms.**
+
+# SMBJ uses NTLM on Android. GSS and MBassador's expression filters are JVM-only optional paths.
+-dontwarn org.ietf.jgss.**
+-dontwarn javax.el.**
+-keepclassmembers class com.hierynomus.smbj.** {
+    @net.engio.mbassy.listener.Handler <methods>;
+}
