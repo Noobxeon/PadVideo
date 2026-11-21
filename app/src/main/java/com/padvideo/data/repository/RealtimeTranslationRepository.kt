@@ -1,5 +1,6 @@
 package com.padvideo.data.repository
 
+import android.util.AtomicFile
 import android.util.LruCache
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.MlKitException
@@ -15,6 +16,8 @@ import com.padvideo.data.model.TranslationLanguage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -37,11 +40,15 @@ class RealtimeTranslationRepository(
 ) {
 
     private val languageIdentifier by lazy { LanguageIdentification.getClient() }
+    private val offlineLock = Mutex()
+    private var offlineClient: Translator? = null
+    private var offlineLanguagePair: Pair<String, String>? = null
     private val json = Json { ignoreUnknownKeys = true }
     private val memoryCache = LruCache<String, String>(2048)
-    private val diskCacheMap = mutableMapOf<String, String>()
+    private val diskCacheMap = linkedMapOf<String, String>()
     private val cacheLock = Any()
-    private val diskCacheFile: File? = cacheDirectory?.let { File(it, "translation_lru_cache.json") }
+    private val diskWriteLock = Any()
+    private val diskCacheFile = cacheDirectory?.let { AtomicFile(File(it, "translation_lru_cache.json")) }
 
     init {
         loadDiskCache()
@@ -49,9 +56,9 @@ class RealtimeTranslationRepository(
 
     private fun loadDiskCache() {
         val file = diskCacheFile ?: return
-        if (!file.exists()) return
+        if (!file.baseFile.exists()) return
         runCatching {
-            val map = json.decodeFromString<Map<String, String>>(file.readText())
+            val map = json.decodeFromString<Map<String, String>>(file.readFully().toString(Charsets.UTF_8))
             synchronized(cacheLock) {
                 diskCacheMap.putAll(map)
                 map.forEach { (k, v) -> memoryCache.put(k, v) }
@@ -61,25 +68,36 @@ class RealtimeTranslationRepository(
 
     private fun persistDiskCacheSnapshot() {
         val file = diskCacheFile ?: return
-        val snapshot = synchronized(cacheLock) {
-            if (diskCacheMap.size > 1500) {
-                val keysToDrop = diskCacheMap.keys.take(diskCacheMap.size - 1200)
-                keysToDrop.forEach { diskCacheMap.remove(it) }
+        synchronized(diskWriteLock) {
+            val snapshot = synchronized(cacheLock) {
+                if (diskCacheMap.size > 1500) {
+                    val keysToDrop = diskCacheMap.keys.take(diskCacheMap.size - 1200)
+                    keysToDrop.forEach { diskCacheMap.remove(it) }
+                }
+                LinkedHashMap(diskCacheMap)
             }
-            HashMap(diskCacheMap)
-        }
-        runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(json.encodeToString(snapshot))
+            runCatching {
+                file.baseFile.parentFile?.mkdirs()
+                val output = file.startWrite()
+                try {
+                    output.write(json.encodeToString(snapshot).toByteArray(Charsets.UTF_8))
+                    file.finishWrite(output)
+                } catch (error: Exception) {
+                    file.failWrite(output)
+                    throw error
+                }
+            }
         }
     }
 
-    private fun buildCacheKey(
-        engine: TranslationEngineType,
-        sourceLang: String,
-        targetLang: String,
-        text: String
-    ): String = "${engine.name}|$sourceLang|$targetLang|${text.trim()}"
+    private fun buildCacheKey(config: TranslationConfig, text: String): String {
+        val engineKey = when (config.engine) {
+            TranslationEngineType.MLKIT_OFFLINE -> "MLKIT_OFFLINE_V2"
+            TranslationEngineType.OPENAI_COMPATIBLE -> "${config.engine.name}|${config.openAiBaseUrl}|${config.openAiModel}"
+            else -> config.engine.name
+        }
+        return "$engineKey|${config.sourceLanguageCode}|${config.targetLanguage.isoCode}|${text.trim()}"
+    }
 
     fun getCachedTranslation(
         text: String,
@@ -87,20 +105,18 @@ class RealtimeTranslationRepository(
     ): String? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return ""
-        val key = buildCacheKey(config.engine, config.sourceLanguageCode, config.targetLanguage.isoCode, trimmed)
+        val key = buildCacheKey(config, trimmed)
         return synchronized(cacheLock) { memoryCache.get(key) ?: diskCacheMap[key] }
     }
 
     private fun putCache(
-        engine: TranslationEngineType,
-        sourceLang: String,
-        targetLang: String,
+        config: TranslationConfig,
         originalText: String,
         translatedText: String
     ) {
         val trimmed = originalText.trim()
         if (trimmed.isEmpty() || translatedText.isBlank()) return
-        val key = buildCacheKey(engine, sourceLang, targetLang, trimmed)
+        val key = buildCacheKey(config, trimmed)
         synchronized(cacheLock) {
             memoryCache.put(key, translatedText)
             diskCacheMap[key] = translatedText
@@ -172,7 +188,7 @@ class RealtimeTranslationRepository(
                 val trans = translatedList.getOrNull(localIdx)?.trim().orEmpty()
                 results[originalIdx] = trans.ifEmpty { texts[originalIdx] }
                 if (trans.isNotEmpty()) {
-                    putCache(config.engine, sourceCode, targetIso, uncachedTexts[localIdx], trans)
+                    putCache(config, uncachedTexts[localIdx], trans)
                 }
             }
             persistDiskCacheSnapshot()
@@ -321,7 +337,8 @@ class RealtimeTranslationRepository(
         val target = targetLang.mlKitCode
         if (source == target) return texts
 
-        return createTranslator(source, target).use { translator ->
+        return offlineLock.withLock {
+            val translator = offlineTranslator(source, target)
             try {
                 texts.map { translator.translate(it).await() }
             } catch (error: MlKitException) {
@@ -331,14 +348,27 @@ class RealtimeTranslationRepository(
         }
     }
 
+    // Keep one warm translator so adjacent captions can reuse the loaded model.
+    private fun offlineTranslator(source: String, target: String): Translator {
+        val pair = source to target
+        if (offlineLanguagePair == pair) offlineClient?.let { return it }
+
+        val translator = createTranslator(source, target)
+        offlineClient?.close()
+        offlineClient = translator
+        offlineLanguagePair = pair
+        return translator
+    }
+
     suspend fun downloadOfflinePair(config: TranslationConfig): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             require(config.sourceLanguageCode != "auto") { "请先手动选择视频源语言" }
             val source = mlKitLanguage(config.sourceLanguageCode)
             val target = config.targetLanguage.mlKitCode
             if (source != target) {
-                createTranslator(source, target).use { translator ->
-                    translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
+                offlineLock.withLock {
+                    offlineTranslator(source, target)
+                        .downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
                 }
             }
             Unit
