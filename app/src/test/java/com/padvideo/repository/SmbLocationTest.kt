@@ -30,6 +30,16 @@ class SmbLocationTest {
     }
 
     @Test
+    fun `Windows UNC paths preserve Unicode spaces and literal percent and hash characters`() {
+        val location = SmbLocation.parse("""\\WIN-PC\家庭 影片\Series #1\100%.mp4""")
+
+        assertEquals("win-pc", location.host)
+        assertEquals("家庭 影片", location.share)
+        assertEquals("Series #1\\100%.mp4", location.path)
+        assertEquals(location, SmbLocation.parse(location.uri))
+    }
+
+    @Test
     fun `reject incomplete ambiguous and credential bearing SMB addresses`() {
         listOf(
             "https://nas/Movies", "smb://nas", "smb://user:password@nas/Movies",
