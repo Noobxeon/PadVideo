@@ -6,12 +6,14 @@ import com.padvideo.data.preferences.AppSettingsRepository
 import com.padvideo.data.repository.FileExplorerRepository
 import com.padvideo.data.repository.OnlineSubtitleRepository
 import com.padvideo.data.repository.RealtimeTranslationRepository
+import com.padvideo.data.repository.SmbRepository
 import java.io.File
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     val settingsRepository = AppSettingsRepository(appContext)
+    internal val smbRepository = SmbRepository()
     val fileExplorerRepository = FileExplorerRepository(appContext)
     val translationRepository = RealtimeTranslationRepository(
         cacheDirectory = File(appContext.cacheDir, "translations")
