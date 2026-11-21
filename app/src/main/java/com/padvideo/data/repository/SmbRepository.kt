@@ -14,14 +14,32 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal class SmbRepository {
     class Credentials(user: String, password: String, domain: String) {
-        val isGuest = user.isBlank()
+        private val account = user.trim().split('\\', limit = 2)
+        private val username = account.last().trim()
+        private val qualifiedDomain = account.first().trim().takeIf { account.size == 2 }
+        private val enteredDomain = domain.trim()
+        val isGuest = username.isEmpty()
+
+        init {
+            require(qualifiedDomain == null ||
+                (qualifiedDomain.isNotEmpty() && username.isNotEmpty() && '\\' !in username)
+            ) { "Windows 账号格式应为 电脑名\\用户名 或 域\\用户名" }
+            require(qualifiedDomain == null || enteredDomain.isEmpty() ||
+                enteredDomain.equals(qualifiedDomain, ignoreCase = true)
+            ) { "账号前缀和单独填写的域不一致" }
+            require(!isGuest || (enteredDomain.isEmpty() && password.isEmpty())) {
+                "填写密码或域时，请同时填写 SMB 账号"
+            }
+        }
+
         val context = if (isGuest) AuthenticationContext.anonymous()
-        else AuthenticationContext(user.trim(), password.toCharArray(), domain.trim())
+        else AuthenticationContext(username, password.toCharArray(), qualifiedDomain ?: enteredDomain)
     }
 
     data class Entry(val name: String, val location: SmbLocation, val isFolder: Boolean, val size: Long) {
@@ -52,7 +70,7 @@ internal class SmbRepository {
             val root = location.copy(segments = emptyList())
             val auth = credentials ?: sessions[root] ?: throw IOException("请重新连接 SMB 共享")
             val entries = withShare(location, auth) { share ->
-                share.list(location.path).mapNotNull { info ->
+                operation(SmbConnectionStep.BROWSE, auth, location) { share.list(location.path) }.mapNotNull { info ->
                     val name = info.fileName
                     if (name == "." || name == "..") return@mapNotNull null
                     val isFolder = info.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value != 0L
@@ -70,12 +88,32 @@ internal class SmbRepository {
 
     private fun <T> withShare(location: SmbLocation, auth: Credentials, action: (DiskShare) -> T): T =
         client(auth).use { client ->
-            client.connect(location.host.removeSurrounding("[", "]"), location.port).use { connection ->
-                connection.authenticate(auth.context).use { session ->
-                    (session.connectShare(location.share) as DiskShare).use(action)
+            operation(SmbConnectionStep.CONNECT, auth, location) {
+                client.connect(location.host.removeSurrounding("[", "]"), location.port)
+            }.use { connection ->
+                operation(SmbConnectionStep.AUTHENTICATE, auth, location) {
+                    connection.authenticate(auth.context)
+                }.use { session ->
+                    operation(SmbConnectionStep.SHARE, auth, location) {
+                        session.connectShare(location.share) as? DiskShare
+                            ?: throw IOException("SMB share is not a disk share")
+                    }.use(action)
                 }
             }
         }
+
+    private inline fun <T> operation(
+        step: SmbConnectionStep,
+        auth: Credentials,
+        location: SmbLocation,
+        action: () -> T
+    ): T = try {
+        action()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        throw SmbConnectionFailure(step, auth.isGuest, location.port, error)
+    }
 
     fun open(location: SmbLocation): OpenFile {
         val credentials = sessions[location.copy(segments = emptyList())]
