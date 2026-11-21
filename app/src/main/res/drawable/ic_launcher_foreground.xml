@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Tablet Cinema Frame -->
+    <path
+        android:fillColor="#26FFFFFF"
+        android:strokeColor="#EEFFFFFF"
+        android:strokeWidth="2.8"
+        android:pathData="M28,33 C28,29.686 30.686,27 34,27 L74,27 C77.314,27 80,29.686 80,33 L80,75 C80,78.314 77.314,81 74,81 L34,81 C30.686,81 28,78.314 28,75 Z" />
+    <!-- Play Triangle -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M47,40.5 L66,51.5 L47,62.5 Z" />
+    <!-- Bilingual Subtitle Bars inside Tablet Frame -->
+    <path
+        android:fillColor="#FF5EEAD4"
+        android:pathData="M37,69 L71,69 C72.1,69 73,69.9 73,71 C73,72.1 72.1,73 71,73 L37,73 C35.9,73 35,72.1 35,71 C35,69.9 35.9,69 37,69 Z" />
+    <path
+        android:fillColor="#BBFFFFFF"
+        android:pathData="M43,75 L65,75 C65.8,75 66.5,75.7 66.5,76.5 C66.5,77.3 65.8,78 65,78 L43,78 C42.2,78 41.5,77.3 41.5,76.5 C41.5,75.7 42.2,75 43,75 Z" />
+</vector>

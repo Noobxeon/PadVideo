@@ -1,0 +1,20 @@
+# Gradle & Build Artifacts
+.gradle/
+.kotlin/
+build/
+app/build/
+
+# Local Environment & Signing Secrets
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# IDE & OS Files
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+captures/
+.externalNativeBuild/
+.cxx/
