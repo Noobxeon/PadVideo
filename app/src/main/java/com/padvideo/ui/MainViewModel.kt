@@ -119,6 +119,7 @@ class MainViewModel(
     private val _networkBrowser = MutableStateFlow(NetworkBrowserState())
     internal val networkBrowser = _networkBrowser.asStateFlow()
     private var smbBrowseJob: Job? = null
+    private var smbBrowserCredentials: SmbRepository.Credentials? = null
 
     internal fun connectSmb(address: String, user: String, password: String, domain: String) {
         try {
@@ -145,7 +146,7 @@ class MainViewModel(
         val state = _networkBrowser.value
         if (state.loading) return true
         val location = state.location ?: return false
-        if (location.segments.isEmpty()) return false
+        if (location.isServer) return false
         browseSmb(location.parent())
         return true
     }
@@ -156,7 +157,9 @@ class MainViewModel(
             val previous = _networkBrowser.value
             _networkBrowser.value = previous.copy(loading = true, message = null)
             try {
-                val entries = container.smbRepository.list(location, credentials)
+                val auth = credentials ?: smbBrowserCredentials
+                val entries = container.smbRepository.list(location, auth)
+                smbBrowserCredentials = auth
                 _networkBrowser.value = NetworkBrowserState(location, entries)
             } catch (error: CancellationException) {
                 throw error
