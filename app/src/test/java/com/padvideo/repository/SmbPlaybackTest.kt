@@ -52,6 +52,18 @@ class SmbPlaybackTest {
     }
 
     @Test
+    fun `a server address lists visible disk shares before browsing a directory`() = runTest {
+        assumeTrue("Start the local SMB fixture first", System.getenv("PADVIDEO_TEST_SMB") == "1")
+        val server = SmbLocation.parse("127.0.0.1:1445")
+        val repo = SmbRepository()
+        val shares = repo.list(server, SmbRepository.Credentials("padvideo", "fixture-password", ""))
+
+        assertEquals(listOf("VIDEOS", "家庭 影片"), shares.map { it.name })
+        assertTrue(shares.all { it.isFolder && it.location.parent() == server })
+        assertEquals("剧集", repo.list(shares.first().location).single().name)
+    }
+
+    @Test
     fun `rejected password is reported as an authentication error without showing secrets`() = runTest {
         assumeTrue("Start the local SMB fixture first", System.getenv("PADVIDEO_TEST_SMB") == "1")
         val root = SmbLocation.parse("smb://127.0.0.1:1445/VIDEOS")
