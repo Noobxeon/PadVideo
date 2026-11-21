@@ -2,16 +2,19 @@ package com.padvideo.data.repository
 
 import android.util.LruCache
 import com.google.mlkit.common.model.DownloadConditions
-import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.common.MlKitException
+import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
-import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import com.padvideo.data.model.SubtitleCue
 import com.padvideo.data.model.TranslationConfig
 import com.padvideo.data.model.TranslationEngineType
 import com.padvideo.data.model.TranslationLanguage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -33,6 +36,7 @@ class RealtimeTranslationRepository(
     private val myMemoryUrl: String = "https://api.mymemory.translated.net/get"
 ) {
 
+    private val languageIdentifier by lazy { LanguageIdentification.getClient() }
     private val json = Json { ignoreUnknownKeys = true }
     private val memoryCache = LruCache<String, String>(2048)
     private val diskCacheMap = mutableMapOf<String, String>()
@@ -161,6 +165,8 @@ class RealtimeTranslationRepository(
             }
         }
 
+        coroutineContext.ensureActive()
+        fetchedResult.exceptionOrNull()?.let { if (it is CancellationException) throw it }
         fetchedResult.map { translatedList ->
             uncachedIndices.forEachIndexed { localIdx, originalIdx ->
                 val trans = translatedList.getOrNull(localIdx)?.trim().orEmpty()
@@ -174,40 +180,27 @@ class RealtimeTranslationRepository(
         }
     }
 
-    /**
-     * Translates a window of upcoming cues ahead of the playhead and invokes [onProgress] per chunk.
-     */
     suspend fun translateCueWindow(
         cues: List<SubtitleCue>,
         startIndex: Int,
         windowSize: Int = 20,
         config: TranslationConfig,
         onUpdatedCues: (Map<Int, String>) -> Unit
-    ) {
-        if (cues.isEmpty() || startIndex !in cues.indices) return
+    ): Result<Unit> {
+        if (startIndex !in cues.indices) return Result.success(Unit)
         val endExclusive = (startIndex + windowSize).coerceAtMost(cues.size)
-        val slice = cues.subList(startIndex, endExclusive)
+        val pending = cues.subList(startIndex, endExclusive)
             .filter { it.translatedText.isNullOrBlank() && it.originalText.isNotBlank() }
 
-        if (slice.isEmpty()) return
-
-        // Translate in compact chunks of 8 cues for fast progressive UI updates
-        slice.chunked(8).forEach { chunk ->
-            val texts = chunk.map { it.originalText.replace('\n', ' ') }
-            val batchResult = translateBatch(texts, config)
-            batchResult.onSuccess { translated ->
-                val updates = mutableMapOf<Int, String>()
-                chunk.forEachIndexed { i, cue ->
-                    val tr = translated.getOrNull(i)?.trim()
-                    if (!tr.isNullOrBlank()) {
-                        updates[cue.index] = tr
-                    }
-                }
-                if (updates.isNotEmpty()) {
-                    onUpdatedCues(updates)
-                }
-            }
+        for (chunk in pending.chunked(if (config.engine == TranslationEngineType.MLKIT_OFFLINE) 2 else 8)) {
+            val batch = translateBatch(chunk.map { it.originalText.replace('\n', ' ') }, config)
+            val translations = batch.getOrElse { return Result.failure(it) }
+            val updates = chunk.zip(translations).mapNotNull { (cue, text) ->
+                text.trim().takeIf { it.isNotEmpty() }?.let { cue.index to it }
+            }.toMap()
+            if (updates.isNotEmpty()) onUpdatedCues(updates)
         }
+        return Result.success(Unit)
     }
 
     private fun translateViaGoogleGtx(
@@ -317,47 +310,51 @@ class RealtimeTranslationRepository(
         sourceLang: String,
         targetLang: TranslationLanguage
     ): List<String> {
-        val sampleText = texts.joinToString(" ")
         val resolvedSource = if (sourceLang == "auto" || sourceLang.isBlank()) {
-            detectHeuristicLanguage(sampleText, targetLang.mlKitCode).substringBefore('-')
+            val sample = texts.joinToString(" ")
+            val detected = languageIdentifier.identifyLanguage(sample).await()
+            if (detected == "und") detectHeuristicLanguage(sample, targetLang.mlKitCode) else detected
         } else {
-            sourceLang.substringBefore('-')
+            sourceLang
         }
-        val mlSource = TranslateLanguage.fromLanguageTag(resolvedSource) ?: TranslateLanguage.ENGLISH
-        val mlTarget = TranslateLanguage.fromLanguageTag(targetLang.mlKitCode) ?: TranslateLanguage.CHINESE
+        val source = mlKitLanguage(resolvedSource)
+        val target = targetLang.mlKitCode
+        if (source == target) return texts
 
-        val options = TranslatorOptions.Builder()
-            .setSourceLanguage(mlSource)
-            .setTargetLanguage(mlTarget)
-            .build()
-        val translator = Translation.getClient(options)
-        return try {
-            val conditions = DownloadConditions.Builder().build()
-            translator.downloadModelIfNeeded(conditions).await()
-            texts.map { line -> translator.translate(line).await() }
-        } finally {
-            translator.close()
+        return createTranslator(source, target).use { translator ->
+            try {
+                texts.map { translator.translate(it).await() }
+            } catch (error: MlKitException) {
+                if (error.errorCode != MlKitException.NOT_FOUND) throw error
+                throw IllegalStateException("请联网下载 ${source} → ${target} 离线模型后重试", error)
+            }
         }
     }
 
-    suspend fun isOfflineModelDownloaded(lang: TranslationLanguage): Boolean = withContext(Dispatchers.IO) {
+    suspend fun downloadOfflinePair(config: TranslationConfig): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val code = TranslateLanguage.fromLanguageTag(lang.mlKitCode) ?: return@runCatching false
-            val model = TranslateRemoteModel.Builder(code).build()
-            RemoteModelManager.getInstance().isModelDownloaded(model).await()
-        }.getOrDefault(false)
-    }
-
-    suspend fun downloadOfflineModel(lang: TranslationLanguage): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            val code = TranslateLanguage.fromLanguageTag(lang.mlKitCode)
-                ?: throw IllegalArgumentException("Unsupported ML Kit language: ${lang.mlKitCode}")
-            val model = TranslateRemoteModel.Builder(code).build()
-            val conditions = DownloadConditions.Builder().build()
-            RemoteModelManager.getInstance().download(model, conditions).await()
+            require(config.sourceLanguageCode != "auto") { "请先手动选择视频源语言" }
+            val source = mlKitLanguage(config.sourceLanguageCode)
+            val target = config.targetLanguage.mlKitCode
+            if (source != target) {
+                createTranslator(source, target).use { translator ->
+                    translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
+                }
+            }
             Unit
+        }.also { result ->
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
         }
     }
+
+    private fun mlKitLanguage(tag: String): String =
+        TranslateLanguage.fromLanguageTag(tag.substringBefore('-'))
+            ?: throw IllegalArgumentException("端侧翻译暂不支持该源语言（$tag），请手动选择")
+
+    private fun createTranslator(source: String, target: String): Translator =
+        Translation.getClient(
+            TranslatorOptions.Builder().setSourceLanguage(source).setTargetLanguage(target).build()
+        )
 
     private fun translateViaOpenAiCompatible(
         texts: List<String>,
