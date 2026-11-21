@@ -13,7 +13,8 @@
 
 ### 2. 全功能平板文件浏览器与视频媒体库
 - **双模浏览**：既提供自动聚合分辨率标签（`4K UHD` / `1080P`）、缩略图缓存与观看进度条的 **智能媒体库**，也提供完整的 **层级目录文件浏览器**。
-- **全存储介质支持**：支持内部存储快捷跳转、交互式路径面包屑导航、目录收藏夹、自然数字剧集排序（`Episode 2` 排在 `Episode 10` 之前）、搜索过滤，以及通过 **SAF 目录树挂载 USB-C U盘 / 移动硬盘** 与系统级「打开方式」直连播放。
+- **本地浏览**：支持内部存储快捷跳转、交互式路径面包屑导航、目录收藏夹、自然数字剧集排序（`Episode 2` 排在 `Episode 10` 之前）、搜索过滤，以及通过 **SAF 目录树挂载 USB-C U盘 / 移动硬盘** 与系统级「打开方式」直连播放。
+- **网络浏览**：在「文件浏览 → 网络」输入 `smb://服务器/共享目录`，可选填账号、密码和域。支持 SMB 2/3 共享的目录浏览、过滤、直接播放、拖动进度与同目录选集。账号和密码保存在当前应用进程中。网络页也能打开 HTTP、HTTPS 和 RTSP 视频地址。
 - **外挂字幕自动关联**：打开视频时自动扫描并挂载同目录下同名 `.srt` / `.ass` / `.ssa` / `.vtt` 外挂字幕文件。
 
 ### 3. 商业级专业播放控制（Media3 ExoPlayer 内核）
@@ -34,9 +35,9 @@
 - **播放指针前瞻预翻译（Lookahead Sliding Window）**：提前在后台批量预翻译播放位置后方对白，结合 **内存 + 磁盘二级 LRU 缓存**，快退重听与 A-B 复读零延迟、零重复请求。
 - **五种翻译引擎自由切换与自动容灾**：
   1. **智能云端双引擎（默认免配置）**：自动调度 `Google GTX` 与 `MyMemory` 全球翻译接口，无需任何 API Key，国内海外网络自动无缝容灾。
-  2. **Google ML Kit 端侧离线神经翻译**：支持在面板内一键预下载 `~30MB` 离线语言包，飞机/断网环境下依然毫秒级离线双语翻译。
+  2. **Google ML Kit 端侧离线神经翻译**：在播放器的翻译面板选择 **ML Kit 端侧离线翻译**，选好源语言和目标语言后点击 **下载离线模型**。模型就绪后，打开 **双语对照** 或 **仅显示目标译文** 即可断网翻译外挂或内嵌文本字幕。
   3. **自定义 AI 大模型精翻（OpenAI / DeepSeek / 通义千问 / Ollama）**：结合前后句语境批量地道意译影视俚语与台词。
-- **无字幕生肉视频实时语音识别同传**：针对完全没有内嵌或外挂字幕的视频，支持开启系统 `SpeechRecognizer` 连续原声识别 + 实时双语翻译上屏，并支持将识别翻译结果导出为 `.srt` 文件。
+- **无字幕生肉视频实时语音识别同传**：针对完全没有内嵌或外挂字幕的视频，可通过麦克风和 Android 系统语音识别服务识别现场声音，再实时翻译并导出 `.srt`。离线语音同传需要支持端侧语音识别的 Android 12 或更新版本，以及系统已安装的语音模型。
 
 ### 5. 多源聚合在线字幕搜索与智能转码
 - **智能片名解析与文件哈希匹配**：自动剥离 `2160p.BluRay.x265` 等发布组标签提取纯净片名、年份与 `SxxExx` 季集号；支持中文搜索词自动译为英文检索全球库，并计算本地视频 **射手 4 段 MD5 哈希** 与 **OpenSubtitles 64-bit MovieHash**。
@@ -81,18 +82,22 @@ app/src/main/java/com/padvideo/
 
 ```bash
 # 运行全部单元测试、MockWebServer 网络集成测试与 Robolectric 平板 Compose UI 测试
-./gradlew testDebugUnitTest
+bash gradlew testDebugUnitTest
 
 # 运行 Android Lint 静态检查
-./gradlew lintDebug
+bash gradlew lintDebug
 
 # 构建 Debug 与混淆签名版 Release APK
-./gradlew assembleDebug assembleRelease
+bash gradlew assembleDebug assembleRelease
 ```
 
-输出安装包位于：
+输出安装包位于以下目录。
 - Debug APK: `app/build/outputs/apk/debug/app-debug.apk`
 - Release APK: `app/build/outputs/apk/release/app-release.apk`
+
+安装 v1.1.0 时，已安装 v1.0.0 的设备需先卸载旧版。v1.1.0 使用新的发布证书，卸载会清除旧版的应用内设置和观看记录。
+
+在 GitHub Actions 发布时，通过仓库 Secrets 配置 `PADVIDEO_KEYSTORE_BASE64`、`PADVIDEO_STORE_PASSWORD`、`PADVIDEO_KEY_ALIAS` 和 `PADVIDEO_KEY_PASSWORD`。在 `main` 运行 Android CI 并勾选 `publish` 后，工作流会先测试，再验证 APK 签名并发布。
 
 ---
 
