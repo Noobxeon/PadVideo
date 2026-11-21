@@ -11,8 +11,14 @@ val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
         keystorePropertiesFile.inputStream().use { load(it) }
+    } else if (providers.environmentVariable("PADVIDEO_KEYSTORE_PATH").isPresent) {
+        setProperty("storeFile", providers.environmentVariable("PADVIDEO_KEYSTORE_PATH").get())
+        setProperty("storePassword", providers.environmentVariable("PADVIDEO_STORE_PASSWORD").get())
+        setProperty("keyAlias", providers.environmentVariable("PADVIDEO_KEY_ALIAS").get())
+        setProperty("keyPassword", providers.environmentVariable("PADVIDEO_KEY_PASSWORD").get())
     }
 }
+val hasReleaseSigning = !keystoreProperties.isEmpty
 
 android {
     namespace = "com.padvideo"
@@ -22,13 +28,13 @@ android {
         applicationId = "com.padvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
+        if (hasReleaseSigning) {
             create("release") {
                 storeFile = file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
@@ -45,7 +51,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = if (keystorePropertiesFile.exists()) {
+            signingConfig = if (hasReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")
@@ -119,12 +125,15 @@ dependencies {
 
     // Networking & Serialization (Online Subtitle Search + Cloud/AI Translation)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.hierynomus:smbj:0.14.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // Google ML Kit On-Device Neural Translation (Offline Real-Time Translation)
     implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
+
 
     // Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")
