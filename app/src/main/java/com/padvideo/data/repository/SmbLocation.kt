@@ -20,11 +20,21 @@ internal data class SmbLocation(
 
     companion object {
         fun parse(value: String): SmbLocation {
-            val uri = runCatching { URI(value.trim().replace(" ", "%20")) }.getOrNull()
+            val address = value.trim()
+            val uri = runCatching {
+                if (address.startsWith("\\\\")) {
+                    val unc = address.drop(2)
+                    val host = unc.substringBefore('\\')
+                    val path = unc.drop(host.length).replace('\\', '/')
+                    URI("smb", host, path, null, null)
+                } else {
+                    URI(address.replace(" ", "%20"))
+                }
+            }.getOrNull()
             require(uri != null && uri.scheme.equals("smb", ignoreCase = true) && uri.host != null &&
                 uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
                 (uri.port == -1 || uri.port in 1..65535)
-            ) { "请输入 smb://服务器/共享目录，账号和密码请填在单独的输入框" }
+            ) { "请输入 smb://服务器/共享名，或粘贴 Windows 共享路径；账号和密码请单独填写" }
             val parts = uri.path.trim('/').split('/')
             require(parts.all { it.isNotBlank() && it != "." && it != ".." &&
                 '\\' !in it && it.none(Char::isISOControl) } &&
