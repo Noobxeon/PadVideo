@@ -10,7 +10,7 @@ import java.net.UnknownHostException
 import java.util.concurrent.TimeoutException
 
 internal enum class SmbConnectionStep {
-    CONNECT, AUTHENTICATE, SHARE, BROWSE
+    CONNECT, AUTHENTICATE, LIST_SHARES, SHARE, BROWSE
 }
 
 internal class SmbConnectionFailure(
@@ -37,8 +37,11 @@ private fun describeConnectionFailure(
         NtStatus.STATUS_LOGON_TYPE_NOT_GRANTED -> "Windows 策略未允许该账号通过网络登录"
         NtStatus.STATUS_BAD_NETWORK_NAME -> "Windows 或 NAS 上找不到此共享名，请核对文件夹的共享名称"
         NtStatus.STATUS_OBJECT_NAME_NOT_FOUND, NtStatus.STATUS_OBJECT_PATH_NOT_FOUND -> "共享内找不到此目录"
-        NtStatus.STATUS_ACCESS_DENIED -> if (guest || step == SmbConnectionStep.AUTHENTICATE) loginHint
-            else "账号无权读取此共享，请检查共享权限和文件夹的安全权限"
+        NtStatus.STATUS_ACCESS_DENIED -> when {
+            step == SmbConnectionStep.LIST_SHARES -> "服务器拒绝列出共享，请输入完整地址 smb://电脑IP/共享名"
+            guest || step == SmbConnectionStep.AUTHENTICATE -> loginHint
+            else -> "账号无权读取此共享，请检查共享权限和文件夹的安全权限"
+        }
         else -> when {
             causes.any { it is UnknownHostException } -> "找不到电脑名，请试用 Windows 电脑的局域网 IP 地址"
             causes.any { it is ConnectException || it is NoRouteToHostException } ->
@@ -48,6 +51,7 @@ private fun describeConnectionFailure(
                 else "服务器响应超时，请检查网络后重试"
             step == SmbConnectionStep.CONNECT -> "SMB 协商失败，请检查电脑是否启用了 SMB 2/3 文件共享"
             step == SmbConnectionStep.AUTHENTICATE -> loginHint
+            step == SmbConnectionStep.LIST_SHARES -> "无法列出服务器共享，请输入完整地址 smb://电脑IP/共享名"
             step == SmbConnectionStep.SHARE -> "无法打开共享，请检查共享名和账号权限"
             else -> "无法读取共享目录，请检查路径和读取权限"
         }
