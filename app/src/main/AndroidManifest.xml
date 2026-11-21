@@ -44,6 +44,12 @@
         android:smallScreens="true"
         android:xlargeScreens="true" />
 
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".PadVideoApplication"
         android:allowBackup="true"
