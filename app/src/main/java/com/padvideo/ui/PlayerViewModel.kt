@@ -609,6 +609,7 @@ class PlayerViewModel(
 
     fun downloadAndApplySubtitle(item: OnlineSubtitleResult, autoGenerateBilingual: Boolean = false) {
         val videoTitle = _uiState.value.currentVideo?.title ?: item.title
+        val generation = playbackGeneration
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
@@ -626,6 +627,7 @@ class PlayerViewModel(
                 settings = settings.value,
                 autoGenerateBilingual = autoGenerateBilingual
             )
+            if (generation != playbackGeneration) return@launch
             res.onSuccess { bundle ->
                 playerController.selectEmbeddedSubtitleTrack(null)
                 resetTranslationWork()
