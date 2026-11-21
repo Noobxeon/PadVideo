@@ -4,11 +4,14 @@ import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
+import com.padvideo.data.repository.SmbConnectionFailure
 import com.padvideo.data.repository.SmbLocation
 import com.padvideo.data.repository.SmbRepository
 import com.padvideo.player.SmbDataSource
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,9 +25,9 @@ class SmbPlaybackTest {
     @Test
     fun `browse authenticated share and read a video starting at a seek offset`() = runTest {
         assumeTrue("Start the local SMB fixture first", System.getenv("PADVIDEO_TEST_SMB") == "1")
-        val root = SmbLocation.parse("smb://127.0.0.1:1445/VIDEOS")
+        val root = SmbLocation.parse("""\\127.0.0.1:1445\VIDEOS""")
         val repo = SmbRepository()
-        val folder = repo.list(root, SmbRepository.Credentials("padvideo", "fixture-password", "")).single()
+        val folder = repo.list(root, SmbRepository.Credentials("""WORKGROUP\padvideo""", "fixture-password", "")).single()
         assertEquals("剧集", folder.name)
         assertEquals(true, folder.isFolder)
 
@@ -47,4 +50,30 @@ class SmbPlaybackTest {
             source.close()
         }
     }
+
+    @Test
+    fun `a server address lists visible disk shares before browsing a directory`() = runTest {
+        assumeTrue("Start the local SMB fixture first", System.getenv("PADVIDEO_TEST_SMB") == "1")
+        val server = SmbLocation.parse("127.0.0.1:1445")
+        val repo = SmbRepository()
+        val shares = repo.list(server, SmbRepository.Credentials("padvideo", "fixture-password", ""))
+
+        assertEquals(listOf("VIDEOS", "家庭 影片"), shares.map { it.name })
+        assertTrue(shares.all { it.isFolder && it.location.parent() == server })
+        assertEquals("剧集", repo.list(shares.first().location).single().name)
+    }
+
+    @Test
+    fun `rejected password is reported as an authentication error without showing secrets`() = runTest {
+        assumeTrue("Start the local SMB fixture first", System.getenv("PADVIDEO_TEST_SMB") == "1")
+        val root = SmbLocation.parse("smb://127.0.0.1:1445/VIDEOS")
+        val failure = runCatching {
+            SmbRepository().list(root, SmbRepository.Credentials("padvideo", "wrong-password", ""))
+        }.exceptionOrNull()
+
+        assertTrue(failure is SmbConnectionFailure)
+        assertTrue(failure?.message.orEmpty().contains("请核对账号和密码"))
+        assertFalse(failure?.message.orEmpty().contains("wrong-password"))
+    }
+
 }

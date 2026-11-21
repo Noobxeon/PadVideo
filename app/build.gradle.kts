@@ -1,3 +1,11 @@
+import com.android.build.api.instrumentation.AsmClassVisitorFactory
+import com.android.build.api.instrumentation.ClassContext
+import com.android.build.api.instrumentation.ClassData
+import com.android.build.api.instrumentation.InstrumentationParameters
+import com.android.build.api.instrumentation.InstrumentationScope
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.commons.ClassRemapper
+import org.objectweb.asm.commons.SimpleRemapper
 import java.util.Properties
 
 plugins {
@@ -5,6 +13,27 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+}
+
+// The RPC library throws a Java RMI exception on malformed messages. Android does not ship Java RMI.
+abstract class SmbRpcAndroidCompatibility : AsmClassVisitorFactory<InstrumentationParameters.None> {
+    override fun isInstrumentable(classData: ClassData): Boolean =
+        classData.className.startsWith("com.rapid7.client.dcerpc.")
+
+    override fun createClassVisitor(classContext: ClassContext, nextClassVisitor: ClassVisitor): ClassVisitor =
+        ClassRemapper(
+            nextClassVisitor,
+            SimpleRemapper(
+                "java/rmi/UnmarshalException",
+                "com/padvideo/data/repository/SmbRpcDecodingException"
+            )
+        )
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.instrumentation.transformClassesWith(SmbRpcAndroidCompatibility::class.java, InstrumentationScope.ALL) {}
+    }
 }
 
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -28,8 +57,8 @@ android {
         applicationId = "com.padvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -126,6 +155,10 @@ dependencies {
     // Networking & Serialization (Online Subtitle Search + Cloud/AI Translation)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.hierynomus:smbj:0.14.0")
+    implementation("com.rapid7.client:dcerpc:0.12.13") {
+        exclude(group = "com.google.guava", module = "guava")
+    }
+    implementation("com.google.guava:guava:33.4.0-android")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
