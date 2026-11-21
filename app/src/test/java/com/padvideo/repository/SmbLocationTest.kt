@@ -40,9 +40,20 @@ class SmbLocationTest {
     }
 
     @Test
+    fun `server-only addresses open the server and allow navigating back from a share`() {
+        val server = SmbLocation.parse("192.168.1.20")
+        assertEquals(server, SmbLocation.parse("smb://192.168.1.20/"))
+        assertEquals(server, SmbLocation.parse("""\\192.168.1.20"""))
+        assertEquals(true, server.isServer)
+        assertEquals("smb://192.168.1.20", server.uri)
+        assertEquals(server, server.child("Movies").parent())
+        assertEquals("smb://192.168.1.20/Movies", server.child("Movies").uri)
+    }
+
+    @Test
     fun `reject incomplete ambiguous and credential bearing SMB addresses`() {
         listOf(
-            "https://nas/Movies", "smb://nas", "smb://user:password@nas/Movies",
+            "https://nas/Movies", "smb://", "smb://user:password@nas/Movies",
             "smb://nas/Movies?token=value", "smb://nas/Movies/video.mp4#fragment",
             "smb://nas:65536/Movies", "smb://nas/Movies/%2e%2e", "smb://nas/Movies/a%2fb",
             "smb://nas/Movies/a%5cb", "smb://nas/Movies/a//b"
