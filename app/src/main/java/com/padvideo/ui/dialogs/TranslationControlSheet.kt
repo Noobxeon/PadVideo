@@ -52,13 +52,15 @@ fun TranslationControlSheet(
     onSelectEngine: (TranslationEngineType) -> Unit,
     onSelectTargetLanguage: (TranslationLanguage) -> Unit,
     onSelectSourceLanguage: (String) -> Unit,
-    onDownloadOfflinePack: (TranslationLanguage, (String) -> Unit) -> Unit,
+    translationError: String?,
+    onDownloadOfflinePack: ((String) -> Unit) -> Unit,
     onRequestMicPermissionAndStartLiveSpeech: () -> Unit,
     onExportBilingualSrt: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var offlineStatus by remember { mutableStateOf<String?>(null) }
+    var offlineStatus by remember(config.sourceLanguageCode, config.targetLanguage) { mutableStateOf<String?>(null) }
+    var downloadInProgress by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -83,7 +85,7 @@ fun TranslationControlSheet(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "支持外挂/内嵌字幕流前瞻预翻译 + 无字幕视频实时语音识别同传",
+                        text = "支持外挂和内嵌字幕。语音同传通过麦克风收音。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -122,14 +124,8 @@ fun TranslationControlSheet(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("视频源语言", style = MaterialTheme.typography.titleMedium)
                     Spacer(modifier = Modifier.height(6.dp))
-                    val sourceOptions = listOf(
-                        "auto" to "自动识别",
-                        "en" to "英语",
-                        "ja" to "日语",
-                        "ko" to "韩语",
-                        "fr" to "法语",
-                        "ru" to "俄语"
-                    )
+                    val sourceOptions = listOf("auto" to "自动识别") +
+                        TranslationLanguage.entries.map { it.isoCode to it.label }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         sourceOptions.forEach { (code, label) ->
                             FilterChip(
@@ -145,7 +141,7 @@ fun TranslationControlSheet(
                     Text("翻译目标语言", style = MaterialTheme.typography.titleMedium)
                     Spacer(modifier = Modifier.height(6.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        TranslationLanguage.entries.take(6).forEach { lang ->
+                        TranslationLanguage.entries.forEach { lang ->
                             FilterChip(
                                 selected = config.targetLanguage == lang,
                                 onClick = { onSelectTargetLanguage(lang) },
@@ -178,15 +174,23 @@ fun TranslationControlSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                FilledTonalButton(
-                    onClick = {
-                        onDownloadOfflinePack(config.targetLanguage) { msg -> offlineStatus = msg }
-                    },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("预下载 ${config.targetLanguage.label} 离线翻译模型")
+                if (config.engine == TranslationEngineType.MLKIT_OFFLINE) {
+                    FilledTonalButton(
+                        enabled = config.sourceLanguageCode != "auto" && !downloadInProgress,
+                        onClick = {
+                            downloadInProgress = true
+                            offlineStatus = "正在下载离线模型…"
+                            onDownloadOfflinePack { msg ->
+                                offlineStatus = msg
+                                downloadInProgress = false
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("下载离线模型")
+                    }
                 }
 
                 if (hasLoadedSubtitleCues) {
@@ -200,6 +204,14 @@ fun TranslationControlSheet(
                     }
                 }
             }
+
+            if (config.engine == TranslationEngineType.MLKIT_OFFLINE) {
+                Text(
+                    "联网时选择源语言和目标语言并下载模型，再开启双语或译文模式。下载完成后可断网翻译字幕。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            translationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
             offlineStatus?.let { msg ->
                 Spacer(modifier = Modifier.height(8.dp))
