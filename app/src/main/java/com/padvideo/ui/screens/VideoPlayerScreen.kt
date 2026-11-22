@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -59,6 +60,7 @@ import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -73,6 +75,8 @@ import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -105,6 +109,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -172,6 +177,10 @@ fun VideoPlayerScreen(
     var showSpeedTimerSheet by remember { mutableStateOf(false) }
     var showAudioSubStyleSheet by remember { mutableStateOf(false) }
     var showPlaylistBookmarkSheet by remember { mutableStateOf(false) }
+    var showTopOverflowMenu by remember { mutableStateOf(false) }
+    val playerScreenWidthDp = LocalConfiguration.current.screenWidthDp
+    val isCompactPlayerWidth = playerScreenWidthDp < 840
+    val isNarrowTopBar = playerScreenWidthDp < 700
 
     var isUserDraggingSeekSlider by remember { mutableStateOf(false) }
     var seekSliderValue by remember { mutableFloatStateOf(0f) }
@@ -600,29 +609,31 @@ fun VideoPlayerScreen(
                         }
                     }
 
-                    // Top Pro Action Icons
-                    IconButton(onClick = { playerViewModel.stepAbLoopMarker() }) {
-                        Icon(
-                            imageVector = Icons.Outlined.Repeat,
-                            contentDescription = "A-B 区间复读",
-                            tint = if (uiState.abLoop.pointAMs != null) Color(0xFF5EEAD4) else Color.White
-                        )
-                    }
+                    // Top Pro Action Icons (responsive: collapse secondary tools into overflow menu on portrait)
+                    if (!isNarrowTopBar) {
+                        IconButton(onClick = { playerViewModel.stepAbLoopMarker() }) {
+                            Icon(
+                                imageVector = Icons.Outlined.Repeat,
+                                contentDescription = "A-B 区间复读",
+                                tint = if (uiState.abLoop.pointAMs != null) Color(0xFF5EEAD4) else Color.White
+                            )
+                        }
 
-                    IconButton(onClick = { playerViewModel.addBookmarkAtCurrentPosition() }) {
-                        Icon(
-                            imageVector = Icons.Outlined.BookmarkAdd,
-                            contentDescription = "添加视频书签",
-                            tint = Color.White
-                        )
-                    }
+                        IconButton(onClick = { playerViewModel.addBookmarkAtCurrentPosition() }) {
+                            Icon(
+                                imageVector = Icons.Outlined.BookmarkAdd,
+                                contentDescription = "添加视频书签",
+                                tint = Color.White
+                            )
+                        }
 
-                    IconButton(onClick = { playerViewModel.captureScreenshot() }) {
-                        Icon(
-                            imageVector = Icons.Outlined.CameraAlt,
-                            contentDescription = "视频帧截图",
-                            tint = Color.White
-                        )
+                        IconButton(onClick = { playerViewModel.captureScreenshot() }) {
+                            Icon(
+                                imageVector = Icons.Outlined.CameraAlt,
+                                contentDescription = "视频帧截图",
+                                tint = Color.White
+                            )
+                        }
                     }
 
                     IconButton(onClick = { playerViewModel.toggleTranscriptDrawer() }) {
@@ -640,6 +651,62 @@ fun VideoPlayerScreen(
                             tint = Color.White
                         )
                     }
+
+                    if (isNarrowTopBar) {
+                        Box {
+                            IconButton(onClick = { showTopOverflowMenu = true }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "更多工具", tint = Color.White)
+                            }
+                            DropdownMenu(
+                                expanded = showTopOverflowMenu,
+                                onDismissRequest = { showTopOverflowMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("A-B 区间复读") },
+                                    onClick = {
+                                        showTopOverflowMenu = false
+                                        playerViewModel.stepAbLoopMarker()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("添加视频书签") },
+                                    onClick = {
+                                        showTopOverflowMenu = false
+                                        playerViewModel.addBookmarkAtCurrentPosition()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("视频帧截图保存") },
+                                    onClick = {
+                                        showTopOverflowMenu = false
+                                        playerViewModel.captureScreenshot()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Visible translation warning banner when translation fails
+                uiState.translationError?.let { err ->
+                    Surface(
+                        color = Color(0xCC7F1D1D),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(top = 66.dp, start = 16.dp, end = 16.dp)
+                            .clickable { showTranslationSheet = true }
+                    ) {
+                        Text(
+                            text = "$err（点击调整）",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
                 }
 
                 // Bottom Scrim, Seekbar & Pro Feature Strip
@@ -653,7 +720,7 @@ fun VideoPlayerScreen(
                             )
                         )
                         .navigationBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 10.dp)
+                        .padding(horizontal = if (isCompactPlayerWidth) 12.dp else 20.dp, vertical = 10.dp)
                 ) {
                     // Seekbar Row
                     val effectiveDuration = uiState.durationMs.coerceAtLeast(1L)
@@ -692,7 +759,7 @@ fun VideoPlayerScreen(
                             ),
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(horizontal = 12.dp)
+                                .padding(horizontal = 10.dp)
                         )
                         Text(
                             text = formatDurationMs(uiState.durationMs),
@@ -701,16 +768,14 @@ fun VideoPlayerScreen(
                         )
                     }
 
-                    // Transport & Pro Feature Controls Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        // Left group: Lock + Playback Transport
+                    val transMode = settings.translationConfig.displayMode
+
+                    if (isCompactPlayerWidth) {
+                        // Portrait / Narrow 2-Row Clean Control Dock
                         Row(
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
                             IconButton(onClick = { playerViewModel.toggleScreenLock() }) {
                                 Icon(Icons.Outlined.LockOpen, contentDescription = "锁定屏幕防误触", tint = Color.White)
@@ -729,7 +794,7 @@ fun VideoPlayerScreen(
                                 shape = CircleShape,
                                 color = Color(0xFF5EEAD4),
                                 modifier = Modifier
-                                    .size(46.dp)
+                                    .size(44.dp)
                                     .clickable { playerViewModel.playerController.togglePlayPause() }
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
@@ -737,7 +802,7 @@ fun VideoPlayerScreen(
                                         imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
                                         contentDescription = if (isPlaying) "暂停" else "播放",
                                         tint = Color(0xFF042F2E),
-                                        modifier = Modifier.size(28.dp)
+                                        modifier = Modifier.size(26.dp)
                                     )
                                 }
                             }
@@ -751,82 +816,215 @@ fun VideoPlayerScreen(
                             IconButton(onClick = { playerViewModel.playNextEpisode() }) {
                                 Icon(Icons.Outlined.SkipNext, contentDescription = "下一集", tint = Color.White)
                             }
-                        }
-
-                        // Right group: Commercial Feature Pills (Translation, Online Subtitles, Audio/Sub, Speed, Playlist, Aspect)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            val transMode = settings.translationConfig.displayMode
-                            AssistChip(
-                                onClick = { showTranslationSheet = true },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Outlined.Translate,
-                                        contentDescription = null,
-                                        tint = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = "实时翻译 · ${transMode.shortBadge}",
-                                        color = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White
-                                    )
-                                },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = if (transMode != TranslationDisplayMode.OFF) {
-                                        Color(0xFF5EEAD4)
-                                    } else {
-                                        Color.White.copy(alpha = 0.14f)
-                                    }
-                                ),
-                                border = null
-                            )
-
-                            AssistChip(
-                                onClick = { showOnlineSubSheet = true },
-                                leadingIcon = {
-                                    Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                },
-                                label = { Text("在线字幕", color = Color.White) },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = Color.White.copy(alpha = 0.14f)
-                                ),
-                                border = null
-                            )
-
-                            AssistChip(
-                                onClick = { showAudioSubStyleSheet = true },
-                                leadingIcon = {
-                                    Icon(Icons.Outlined.GraphicEq, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                },
-                                label = { Text("音轨/字幕", color = Color.White) },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = Color.White.copy(alpha = 0.14f)
-                                ),
-                                border = null
-                            )
-
-                            AssistChip(
-                                onClick = { showSpeedTimerSheet = true },
-                                leadingIcon = {
-                                    Icon(Icons.Outlined.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                },
-                                label = { Text("${uiState.playbackSpeed}x", color = Color.White) },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = Color.White.copy(alpha = 0.14f)
-                                ),
-                                border = null
-                            )
-
-                            IconButton(onClick = { showPlaylistBookmarkSheet = true }) {
-                                Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, contentDescription = "选集与书签", tint = Color.White)
-                            }
-
                             IconButton(onClick = { playerViewModel.cycleAspectRatio() }) {
                                 Icon(Icons.Outlined.AspectRatio, contentDescription = "切换画面比例", tint = Color.White)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            item {
+                                AssistChip(
+                                    onClick = { showTranslationSheet = true },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Translate,
+                                            contentDescription = null,
+                                            tint = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "实时翻译 · ${transMode.shortBadge}",
+                                            color = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White
+                                        )
+                                    },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = if (transMode != TranslationDisplayMode.OFF) {
+                                            Color(0xFF5EEAD4)
+                                        } else {
+                                            Color.White.copy(alpha = 0.14f)
+                                        }
+                                    ),
+                                    border = null
+                                )
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { showOnlineSubSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("在线字幕", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.14f)),
+                                    border = null
+                                )
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { showAudioSubStyleSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.GraphicEq, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("音轨/字幕", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.14f)),
+                                    border = null
+                                )
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { showSpeedTimerSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("${uiState.playbackSpeed}x", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.14f)),
+                                    border = null
+                                )
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { showPlaylistBookmarkSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("选集/书签", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.14f)),
+                                    border = null
+                                )
+                            }
+                        }
+                    } else {
+                        // Expanded Tablet Landscape 1-Row Commercial Bar
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                IconButton(onClick = { playerViewModel.toggleScreenLock() }) {
+                                    Icon(Icons.Outlined.LockOpen, contentDescription = "锁定屏幕防误触", tint = Color.White)
+                                }
+                                IconButton(onClick = { playerViewModel.playPreviousEpisode() }) {
+                                    Icon(Icons.Outlined.SkipPrevious, contentDescription = "上一集", tint = Color.White)
+                                }
+                                IconButton(
+                                    onClick = {
+                                        playerViewModel.playerController.seekBy(-settings.defaultJumpSeconds * 1000L)
+                                    }
+                                ) {
+                                    Icon(Icons.Outlined.Replay10, contentDescription = "快退", tint = Color.White)
+                                }
+                                Surface(
+                                    shape = CircleShape,
+                                    color = Color(0xFF5EEAD4),
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clickable { playerViewModel.playerController.togglePlayPause() }
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                                            contentDescription = if (isPlaying) "暂停" else "播放",
+                                            tint = Color(0xFF042F2E),
+                                            modifier = Modifier.size(28.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = {
+                                        playerViewModel.playerController.seekBy(settings.defaultJumpSeconds * 1000L)
+                                    }
+                                ) {
+                                    Icon(Icons.Outlined.Forward10, contentDescription = "快进", tint = Color.White)
+                                }
+                                IconButton(onClick = { playerViewModel.playNextEpisode() }) {
+                                    Icon(Icons.Outlined.SkipNext, contentDescription = "下一集", tint = Color.White)
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                AssistChip(
+                                    onClick = { showTranslationSheet = true },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Translate,
+                                            contentDescription = null,
+                                            tint = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "实时翻译 · ${transMode.shortBadge}",
+                                            color = if (transMode != TranslationDisplayMode.OFF) Color(0xFF042F2E) else Color.White
+                                        )
+                                    },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = if (transMode != TranslationDisplayMode.OFF) {
+                                            Color(0xFF5EEAD4)
+                                        } else {
+                                            Color.White.copy(alpha = 0.14f)
+                                        }
+                                    ),
+                                    border = null
+                                )
+
+                                AssistChip(
+                                    onClick = { showOnlineSubSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("在线字幕", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = Color.White.copy(alpha = 0.14f)
+                                    ),
+                                    border = null
+                                )
+
+                                AssistChip(
+                                    onClick = { showAudioSubStyleSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.GraphicEq, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("音轨/字幕", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = Color.White.copy(alpha = 0.14f)
+                                    ),
+                                    border = null
+                                )
+
+                                AssistChip(
+                                    onClick = { showSpeedTimerSheet = true },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("${uiState.playbackSpeed}x", color = Color.White) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = Color.White.copy(alpha = 0.14f)
+                                    ),
+                                    border = null
+                                )
+
+                                IconButton(onClick = { showPlaylistBookmarkSheet = true }) {
+                                    Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, contentDescription = "选集与书签", tint = Color.White)
+                                }
+
+                                IconButton(onClick = { playerViewModel.cycleAspectRatio() }) {
+                                    Icon(Icons.Outlined.AspectRatio, contentDescription = "切换画面比例", tint = Color.White)
+                                }
                             }
                         }
                     }
@@ -889,6 +1087,8 @@ fun VideoPlayerScreen(
             onSelectTargetLanguage = { lang -> playerViewModel.updateTranslationConfig { it.copy(targetLanguage = lang) } },
             onSelectSourceLanguage = { src -> playerViewModel.updateTranslationConfig { it.copy(sourceLanguageCode = src) } },
             translationError = uiState.translationError,
+            onQueryDownloadedOfflineModels = playerViewModel::loadDownloadedOfflineLanguages,
+            onDownloadOfflineLanguagePack = playerViewModel::downloadOfflineLanguagePack,
             onDownloadOfflinePack = playerViewModel::downloadMlKitOfflinePack,
             onRequestMicPermissionAndStartLiveSpeech = {
                 val granted = ContextCompat.checkSelfPermission(
@@ -1072,7 +1272,8 @@ private fun TranscriptSideDrawer(
     Surface(
         color = Color(0xEE0F172A),
         modifier = Modifier
-            .width(360.dp)
+            .fillMaxWidth(0.86f)
+            .widthIn(max = 360.dp)
             .fillMaxHeight()
     ) {
         Column(

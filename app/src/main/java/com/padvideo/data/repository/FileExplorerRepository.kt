@@ -230,6 +230,9 @@ class FileExplorerRepository(private val context: Context?) {
         historyByUri: Map<String, PlaybackHistoryItem> = emptyMap()
     ): List<FileEntry> = withContext(Dispatchers.IO) {
         val children = treeOrDirDoc.listFiles()
+        val subtitleDocs = children.filter { doc ->
+            !doc.isDirectory && doc.name?.let { isSubtitleFileName(it) } == true
+        }
         val entries = children.mapNotNull { doc ->
             val name = doc.name ?: return@mapNotNull null
             if (!showHidden && name.startsWith(".")) return@mapNotNull null
@@ -249,6 +252,15 @@ class FileExplorerRepository(private val context: Context?) {
                 val isVid = isVideoFileName(name) || doc.type?.startsWith("video/") == true
                 val isSub = isSubtitleFileName(name)
                 if (!isVid && !isSub && !showHidden) return@mapNotNull null
+                val sidecars = if (isVid) {
+                    val base = name.substringBeforeLast('.').lowercase(Locale.ROOT)
+                    subtitleDocs.filter { sub ->
+                        val stem = (sub.name ?: "").substringBeforeLast('.').lowercase(Locale.ROOT)
+                        stem == base || stem.startsWith("$base.") || stem.startsWith("${base}_")
+                    }.map { it.uri.toString() }
+                } else {
+                    emptyList()
+                }
                 val hist = historyByUri[uriStr]
                 val videoItem = if (isVid) {
                     VideoItem(
@@ -262,6 +274,7 @@ class FileExplorerRepository(private val context: Context?) {
                         sizeBytes = doc.length(),
                         dateModifiedSec = doc.lastModified() / 1000L,
                         mimeType = doc.type ?: guessVideoMimeType(name),
+                        sidecarSubtitlePaths = sidecars,
                         lastPositionMs = hist?.positionMs ?: 0L,
                         lastPlayedAtMs = hist?.lastPlayedAtMs ?: 0L
                     )
@@ -277,6 +290,7 @@ class FileExplorerRepository(private val context: Context?) {
                     lastModifiedMs = doc.lastModified(),
                     isVideoFile = isVid,
                     isSubtitleFile = isSub,
+                    sidecarSubtitles = sidecars,
                     videoItem = videoItem
                 )
             }

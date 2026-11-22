@@ -11,22 +11,24 @@ import com.padvideo.data.model.AppSettings
 import com.padvideo.data.model.BreadcrumbSegment
 import com.padvideo.data.model.FavoriteFolder
 import com.padvideo.data.model.FileEntry
+import com.padvideo.data.model.MountedStorageSource
 import com.padvideo.data.model.PlaybackHistoryItem
 import com.padvideo.data.model.SafRootBookmark
 import com.padvideo.data.model.SortField
+import com.padvideo.data.model.StorageMountType
 import com.padvideo.data.model.StreamPreset
 import com.padvideo.data.model.VideoItem
 import com.padvideo.data.model.ViewLayoutMode
+import com.padvideo.data.repository.SmbLocation
+import com.padvideo.data.repository.SmbRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import com.padvideo.data.repository.SmbLocation
-import com.padvideo.data.repository.SmbRepository
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -37,18 +39,19 @@ enum class MainNavTab(val label: String) {
     SETTINGS("设置")
 }
 
+enum class ExplorerBackend {
+    LOCAL,
+    SAF,
+    SMB,
+    WEBDAV,
+    QUARK
+}
+
 data class ActivePlaybackLaunch(
     val video: VideoItem,
     val playlist: List<VideoItem> = listOf(video),
     val inlineInitialSrt: String? = null,
     val forceStartFromBeginning: Boolean = false
-)
-
-internal data class NetworkBrowserState(
-    val location: SmbLocation? = null,
-    val entries: List<SmbRepository.Entry> = emptyList(),
-    val loading: Boolean = false,
-    val message: String? = null
 )
 
 class MainViewModel(
@@ -59,6 +62,7 @@ class MainViewModel(
     val history: StateFlow<List<PlaybackHistoryItem>> = container.settingsRepository.history
     val favorites: StateFlow<List<FavoriteFolder>> = container.settingsRepository.favorites
     val safRoots: StateFlow<List<SafRootBookmark>> = container.settingsRepository.safRoots
+    val mountedSources: StateFlow<List<MountedStorageSource>> = container.settingsRepository.mountedSources
 
     private val _selectedTab = MutableStateFlow(MainNavTab.LIBRARY)
     val selectedTab: StateFlow<MainNavTab> = _selectedTab.asStateFlow()
@@ -99,12 +103,18 @@ class MainViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // File Explorer State
+    // Unified File Explorer State (Local + SAF + SMB + WebDAV + Quark all in ONE tab)
+    private val _explorerBackend = MutableStateFlow(ExplorerBackend.LOCAL)
+    val explorerBackend: StateFlow<ExplorerBackend> = _explorerBackend.asStateFlow()
+
     private val _currentDir = MutableStateFlow(container.fileExplorerRepository.defaultStorageRoot)
     val currentDir: StateFlow<File> = _currentDir.asStateFlow()
 
     private val _activeSafTreeUri = MutableStateFlow<String?>(null)
     val activeSafTreeUri: StateFlow<String?> = _activeSafTreeUri.asStateFlow()
+
+    private val _activeMountId = MutableStateFlow<String?>(null)
+    val activeMountId: StateFlow<String?> = _activeMountId.asStateFlow()
 
     private val _fileEntries = MutableStateFlow<List<FileEntry>>(emptyList())
     val fileEntries: StateFlow<List<FileEntry>> = _fileEntries.asStateFlow()
@@ -115,64 +125,31 @@ class MainViewModel(
     private val _fileSearchQuery = MutableStateFlow("")
     val fileSearchQuery: StateFlow<String> = _fileSearchQuery.asStateFlow()
 
-    private val _networkBrowser = MutableStateFlow(NetworkBrowserState())
-    internal val networkBrowser = _networkBrowser.asStateFlow()
-    private var smbBrowseJob: Job? = null
+    private val _isExplorerLoading = MutableStateFlow(false)
+    val isExplorerLoading: StateFlow<Boolean> = _isExplorerLoading.asStateFlow()
 
-    internal fun connectSmb(address: String, credentials: SmbRepository.Credentials) {
-        val location = try {
-            SmbLocation.parse(address)
-        } catch (error: IllegalArgumentException) {
-            _networkBrowser.value = _networkBrowser.value.copy(message = error.message)
-            return
-        }
-        browseSmb(location, credentials)
-    }
+    private val _explorerError = MutableStateFlow<String?>(null)
+    val explorerError: StateFlow<String?> = _explorerError.asStateFlow()
 
-    internal fun openSmbEntry(entry: SmbRepository.Entry) {
-        if (entry.isFolder) {
-            browseSmb(entry.location)
-        } else {
-            val playlist = _networkBrowser.value.entries.filterNot { it.isFolder }.map { it.asVideo() }
-            _activeLaunch.value = ActivePlaybackLaunch(entry.asVideo(), playlist)
-        }
-    }
+    // LAN SMB Auto-Discovery State
+    private val _discoveredLanHosts = MutableStateFlow<List<String>>(emptyList())
+    val discoveredLanHosts: StateFlow<List<String>> = _discoveredLanHosts.asStateFlow()
 
-    internal fun refreshSmb() {
-        _networkBrowser.value.location?.let { browseSmb(it) }
-    }
+    private val _isScanningLan = MutableStateFlow(false)
+    val isScanningLan: StateFlow<Boolean> = _isScanningLan.asStateFlow()
 
-    internal fun navigateUpSmb(): Boolean {
-        val state = _networkBrowser.value
-        if (state.loading) return true
-        val location = state.location ?: return false
-        if (location.segments.isEmpty()) return false
-        browseSmb(location.parent())
-        return true
-    }
+    // Multi-level navigation stacks for non-File backends
+    private var safDirStack: MutableList<DocumentFile> = mutableListOf()
+    private var safCurrentChildrenByUri: Map<String, DocumentFile> = emptyMap()
+    private var activeSmbMount: MountedStorageSource? = null
+    private var activeSmbRootLocation: SmbLocation? = null
+    private var currentSmbLocation: SmbLocation? = null
+    private var activeWebDavMount: MountedStorageSource? = null
+    private var webDavStack: MutableList<Pair<String, String>> = mutableListOf() // (label, url)
+    private var activeQuarkMount: MountedStorageSource? = null
+    private var quarkStack: MutableList<Pair<String, String>> = mutableListOf() // (label, fid)
 
-    private fun browseSmb(location: SmbLocation, credentials: SmbRepository.Credentials? = null) {
-        smbBrowseJob?.cancel()
-        smbBrowseJob = viewModelScope.launch {
-            val previous = _networkBrowser.value
-            _networkBrowser.value = previous.copy(loading = true, message = null)
-            try {
-                val entries = container.smbRepository.list(location, credentials)
-                _networkBrowser.value = NetworkBrowserState(location, entries)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                val status = (error as? com.hierynomus.mssmb2.SMBApiException)?.status
-                val reason = when (status) {
-                    com.hierynomus.mserref.NtStatus.STATUS_LOGON_FAILURE -> "账号或密码错误"
-                    com.hierynomus.mserref.NtStatus.STATUS_ACCESS_DENIED -> "共享拒绝访问"
-                    com.hierynomus.mserref.NtStatus.STATUS_BAD_NETWORK_NAME -> "共享名称不存在"
-                    else -> "请检查服务器地址、网络连接和共享权限"
-                }
-                _networkBrowser.value = previous.copy(loading = false, message = "SMB 连接失败，" + reason)
-            }
-        }
-    }
+    private var explorerLoadJob: Job? = null
 
     // Active Video Player Session
     private val _activeLaunch = MutableStateFlow<ActivePlaybackLaunch?>(null)
@@ -203,6 +180,7 @@ class MainViewModel(
     )
 
     init {
+        container.smbRepository.registerSavedMounts(mountedSources.value)
         refreshMediaLibrary()
         refreshFileExplorer()
     }
@@ -240,27 +218,288 @@ class MainViewModel(
         _selectedInspectorVideo.value = video
     }
 
-    fun openDirectory(dir: File) {
+    // --- Unified Mount Management (SMB / WebDAV / Quark / SAF) ---
+    fun scanLanSmbHosts() {
+        if (_isScanningLan.value) return
+        viewModelScope.launch {
+            _isScanningLan.value = true
+            _discoveredLanHosts.value = container.smbRepository.scanLanSmbHosts()
+            _isScanningLan.value = false
+        }
+    }
+
+    fun saveAndOpenMount(source: MountedStorageSource): String? {
+        // Validate input cleanly before saving
+        val validated = try {
+            when (source.type) {
+                StorageMountType.SMB -> {
+                    val loc = SmbLocation.parse(source.address)
+                    SmbRepository.Credentials(source.username, source.password, source.domain)
+                    source.copy(
+                        name = source.name.trim().ifBlank { loc.share ?: loc.host },
+                        address = loc.uri
+                    )
+                }
+                StorageMountType.WEBDAV -> {
+                    val normUrl = container.webDavRepository.normalizeRootUrl(source.address)
+                    val hostLabel = runCatching { java.net.URI(normUrl).host }.getOrNull() ?: "WebDAV"
+                    source.copy(
+                        name = source.name.trim().ifBlank { hostLabel },
+                        address = normUrl
+                    )
+                }
+                StorageMountType.QUARK -> {
+                    require(source.cookie.isNotBlank()) { "请先通过网页登录夸克网盘，或粘贴有效的 Cookie" }
+                    source.copy(
+                        name = source.name.trim().ifBlank { "夸克网盘" },
+                        address = source.address.ifBlank { "0" }
+                    )
+                }
+            }
+        } catch (err: IllegalArgumentException) {
+            return err.message ?: "输入参数无效"
+        }
+
+        container.settingsRepository.saveMountedSource(validated)
+        if (validated.type == StorageMountType.SMB) {
+            container.smbRepository.registerSavedMounts(mountedSources.value)
+        }
+        _selectedTab.value = MainNavTab.FILES
+        openMountedSource(validated)
+        return null
+    }
+
+    fun removeMountedSource(sourceId: String) {
+        container.settingsRepository.removeMountedSource(sourceId)
+        if (_activeMountId.value == sourceId) {
+            openDirectory(container.fileExplorerRepository.defaultStorageRoot)
+        }
+    }
+
+    fun removeSafRoot(treeUriString: String) {
+        container.settingsRepository.removeSafRoot(treeUriString)
+        if (_activeSafTreeUri.value == treeUriString) {
+            openDirectory(container.fileExplorerRepository.defaultStorageRoot)
+        }
+    }
+
+    fun openMountedSource(source: MountedStorageSource) {
+        _fileSearchQuery.value = ""
+        _explorerError.value = null
         _activeSafTreeUri.value = null
+        safDirStack.clear()
+        safCurrentChildrenByUri = emptyMap()
+        _activeMountId.value = source.id
+
+        when (source.type) {
+            StorageMountType.SMB -> {
+                _explorerBackend.value = ExplorerBackend.SMB
+                activeSmbMount = source
+                val parsed = runCatching { SmbLocation.parse(source.address) }.getOrElse { err ->
+                    _explorerError.value = err.message ?: "SMB 地址无效"
+                    return
+                }
+                activeSmbRootLocation = parsed
+                currentSmbLocation = parsed
+                loadCurrentSmbDirectory()
+            }
+            StorageMountType.WEBDAV -> {
+                _explorerBackend.value = ExplorerBackend.WEBDAV
+                activeWebDavMount = source
+                val rootUrl = runCatching { container.webDavRepository.normalizeRootUrl(source.address) }.getOrElse { err ->
+                    _explorerError.value = err.message ?: "WebDAV 地址无效"
+                    return
+                }
+                webDavStack = mutableListOf(source.name to rootUrl)
+                loadCurrentWebDavDirectory()
+            }
+            StorageMountType.QUARK -> {
+                _explorerBackend.value = ExplorerBackend.QUARK
+                activeQuarkMount = source
+                val rootFid = source.address.ifBlank { "0" }
+                quarkStack = mutableListOf(source.name to rootFid)
+                loadCurrentQuarkDirectory()
+            }
+        }
+    }
+
+    // --- Unified Local / SAF / Remote Navigation ---
+    fun openDirectory(dir: File) {
+        explorerLoadJob?.cancel()
+        _explorerBackend.value = ExplorerBackend.LOCAL
+        _activeSafTreeUri.value = null
+        _activeMountId.value = null
+        _explorerError.value = null
+        safDirStack.clear()
+        safCurrentChildrenByUri = emptyMap()
         _currentDir.value = dir
         refreshFileExplorer()
     }
 
+    fun openSafRootBookmark(context: Context, bookmark: SafRootBookmark) {
+        explorerLoadJob?.cancel()
+        val rootDoc = DocumentFile.fromTreeUri(context, Uri.parse(bookmark.treeUriString))
+        if (rootDoc == null || !rootDoc.canRead()) {
+            _explorerError.value = "无法读取该授权目录，权限可能已失效，请重新挂载"
+            return
+        }
+        _explorerBackend.value = ExplorerBackend.SAF
+        _activeSafTreeUri.value = bookmark.treeUriString
+        _activeMountId.value = null
+        _explorerError.value = null
+        safDirStack = mutableListOf(rootDoc)
+        loadCurrentSafDirectory()
+    }
+
+    fun registerSafTree(context: Context, treeUri: Uri) {
+        val doc = DocumentFile.fromTreeUri(context, treeUri)
+        val label = doc?.name?.ifBlank { "外接存储目录" } ?: "外接存储目录"
+        val bookmark = SafRootBookmark(name = label, treeUriString = treeUri.toString())
+        container.settingsRepository.addSafRoot(bookmark)
+        _selectedTab.value = MainNavTab.FILES
+        openSafRootBookmark(context, bookmark)
+    }
+
+    /**
+     * Handles clicking ANY directory or video entry uniformly across Local, SAF, SMB, WebDAV, and Quark!
+     */
+    fun openFileEntry(entry: FileEntry) {
+        if (!entry.isDirectory) {
+            val video = entry.videoItem ?: return
+            playVideo(video)
+            return
+        }
+
+        _fileSearchQuery.value = ""
+        _explorerError.value = null
+
+        when (_explorerBackend.value) {
+            ExplorerBackend.LOCAL -> {
+                openDirectory(File(entry.path))
+            }
+            ExplorerBackend.SAF -> {
+                // Use the exact DocumentFile instance returned by listFiles() so deep nested subfolders ALWAYS work!
+                val childDoc = safCurrentChildrenByUri[entry.uriString]
+                    ?: safDirStack.lastOrNull()?.findFile(entry.name)
+                if (childDoc != null && childDoc.isDirectory) {
+                    safDirStack.add(childDoc)
+                    loadCurrentSafDirectory()
+                } else {
+                    _explorerError.value = "无法打开子目录：${entry.name}"
+                }
+            }
+            ExplorerBackend.SMB -> {
+                val nextLoc = runCatching { SmbLocation.parse(entry.path) }.getOrNull()
+                    ?: currentSmbLocation?.child(entry.name)
+                if (nextLoc != null) {
+                    currentSmbLocation = nextLoc
+                    loadCurrentSmbDirectory()
+                }
+            }
+            ExplorerBackend.WEBDAV -> {
+                webDavStack.add(entry.name to entry.path)
+                loadCurrentWebDavDirectory()
+            }
+            ExplorerBackend.QUARK -> {
+                val fid = entry.remoteId ?: entry.path.substringAfterLast('/')
+                if (fid.isNotBlank()) {
+                    quarkStack.add(entry.name to fid)
+                    loadCurrentQuarkDirectory()
+                }
+            }
+        }
+    }
+
+    fun openBreadcrumb(segment: BreadcrumbSegment) {
+        _explorerError.value = null
+        when (_explorerBackend.value) {
+            ExplorerBackend.LOCAL -> {
+                openDirectory(File(segment.path))
+            }
+            ExplorerBackend.SAF -> {
+                val targetIdx = segment.stackIndex
+                if (targetIdx in safDirStack.indices) {
+                    safDirStack = safDirStack.take(targetIdx + 1).toMutableList()
+                    loadCurrentSafDirectory()
+                }
+            }
+            ExplorerBackend.SMB -> {
+                val loc = runCatching { SmbLocation.parse(segment.path) }.getOrNull() ?: return
+                currentSmbLocation = loc
+                loadCurrentSmbDirectory()
+            }
+            ExplorerBackend.WEBDAV -> {
+                val targetIdx = segment.stackIndex
+                if (targetIdx in webDavStack.indices) {
+                    webDavStack = webDavStack.take(targetIdx + 1).toMutableList()
+                    loadCurrentWebDavDirectory()
+                }
+            }
+            ExplorerBackend.QUARK -> {
+                val targetIdx = segment.stackIndex
+                if (targetIdx in quarkStack.indices) {
+                    quarkStack = quarkStack.take(targetIdx + 1).toMutableList()
+                    loadCurrentQuarkDirectory()
+                }
+            }
+        }
+    }
+
     fun navigateUpInExplorer(): Boolean {
-        if (_activeSafTreeUri.value != null) {
-            _activeSafTreeUri.value = null
-            refreshFileExplorer()
-            return true
+        _explorerError.value = null
+        return when (_explorerBackend.value) {
+            ExplorerBackend.LOCAL -> {
+                val cur = _currentDir.value
+                val root = container.fileExplorerRepository.defaultStorageRoot
+                val parent = cur.parentFile
+                if (parent != null && cur.absolutePath != root.absolutePath && parent.canRead()) {
+                    _currentDir.value = parent
+                    refreshFileExplorer()
+                    true
+                } else {
+                    false
+                }
+            }
+            ExplorerBackend.SAF -> {
+                if (safDirStack.size > 1) {
+                    safDirStack.removeAt(safDirStack.lastIndex)
+                    loadCurrentSafDirectory()
+                    true
+                } else {
+                    openDirectory(container.fileExplorerRepository.defaultStorageRoot)
+                    true
+                }
+            }
+            ExplorerBackend.SMB -> {
+                val cur = currentSmbLocation ?: return false
+                val root = activeSmbRootLocation
+                if (cur == root || (cur.isServer && cur.segments.isEmpty())) {
+                    false
+                } else {
+                    currentSmbLocation = cur.parent()
+                    loadCurrentSmbDirectory()
+                    true
+                }
+            }
+            ExplorerBackend.WEBDAV -> {
+                if (webDavStack.size > 1) {
+                    webDavStack.removeAt(webDavStack.lastIndex)
+                    loadCurrentWebDavDirectory()
+                    true
+                } else {
+                    false
+                }
+            }
+            ExplorerBackend.QUARK -> {
+                if (quarkStack.size > 1) {
+                    quarkStack.removeAt(quarkStack.lastIndex)
+                    loadCurrentQuarkDirectory()
+                    true
+                } else {
+                    false
+                }
+            }
         }
-        val cur = _currentDir.value
-        val root = container.fileExplorerRepository.defaultStorageRoot
-        val parent = cur.parentFile
-        if (parent != null && cur.absolutePath != root.absolutePath && parent.canRead()) {
-            _currentDir.value = parent
-            refreshFileExplorer()
-            return true
-        }
-        return false
     }
 
     fun setFileSearchQuery(query: String) {
@@ -269,73 +508,215 @@ class MainViewModel(
     }
 
     fun refreshFileExplorer(contextForSaf: Context? = null) {
-        val safUriStr = _activeSafTreeUri.value
-        val historyMap = history.value.associateBy { it.uriString }
-        val s = settings.value
-
-        if (safUriStr != null && contextForSaf != null) {
-            viewModelScope.launch {
-                val doc = DocumentFile.fromTreeUri(contextForSaf, Uri.parse(safUriStr))
-                if (doc != null) {
-                    _breadcrumbs.value = listOf(
-                        BreadcrumbSegment(
-                            label = doc.name ?: "授权目录",
-                            path = safUriStr,
-                            isSafUri = true
-                        )
-                    )
-                    _fileEntries.value = container.fileExplorerRepository.listSafDirectory(
-                        treeOrDirDoc = doc,
-                        showHidden = s.showHiddenFiles,
-                        searchQuery = _fileSearchQuery.value,
-                        sortField = s.sortField,
-                        sortAscending = s.sortAscending,
-                        historyByUri = historyMap
-                    )
-                }
+        when (_explorerBackend.value) {
+            ExplorerBackend.LOCAL -> {
+                val s = settings.value
+                val historyMap = history.value.associateBy { it.uriString }
+                val dir = _currentDir.value
+                _isExplorerLoading.value = false
+                _explorerError.value = null
+                _breadcrumbs.value = container.fileExplorerRepository.buildBreadcrumbs(dir)
+                _fileEntries.value = container.fileExplorerRepository.listDirectory(
+                    directory = dir,
+                    showHidden = s.showHiddenFiles,
+                    searchQuery = _fileSearchQuery.value,
+                    sortField = s.sortField,
+                    sortAscending = s.sortAscending,
+                    historyByUri = historyMap
+                )
             }
+            ExplorerBackend.SAF -> {
+                if (safDirStack.isEmpty() && contextForSaf != null && _activeSafTreeUri.value != null) {
+                    DocumentFile.fromTreeUri(contextForSaf, Uri.parse(_activeSafTreeUri.value!!))?.let {
+                        safDirStack.add(it)
+                    }
+                }
+                loadCurrentSafDirectory()
+            }
+            ExplorerBackend.SMB -> loadCurrentSmbDirectory()
+            ExplorerBackend.WEBDAV -> loadCurrentWebDavDirectory()
+            ExplorerBackend.QUARK -> loadCurrentQuarkDirectory()
+        }
+    }
+
+    private fun loadCurrentSafDirectory() {
+        val currentDoc = safDirStack.lastOrNull() ?: return
+        val s = settings.value
+        val historyMap = history.value.associateBy { it.uriString }
+        val query = _fileSearchQuery.value
+
+        explorerLoadJob?.cancel()
+        explorerLoadJob = viewModelScope.launch {
+            _isExplorerLoading.value = true
+            _explorerError.value = null
+            _breadcrumbs.value = safDirStack.mapIndexed { idx, doc ->
+                BreadcrumbSegment(
+                    label = doc.name?.ifBlank { "挂载目录" } ?: "挂载目录",
+                    path = doc.uri.toString(),
+                    isSafUri = true,
+                    stackIndex = idx
+                )
+            }
+            runCatching {
+                // Cache child DocumentFile references so clicking nested folders works cleanly on every Android version
+                val rawChildren = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    currentDoc.listFiles()
+                }
+                safCurrentChildrenByUri = rawChildren.associateBy { it.uri.toString() }
+                container.fileExplorerRepository.listSafDirectory(
+                    treeOrDirDoc = currentDoc,
+                    showHidden = s.showHiddenFiles,
+                    searchQuery = query,
+                    sortField = s.sortField,
+                    sortAscending = s.sortAscending,
+                    historyByUri = historyMap
+                )
+            }.onSuccess { entries ->
+                _fileEntries.value = entries
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _explorerError.value = "读取挂载目录失败：${err.message ?: "请重新授权目录"}"
+                _fileEntries.value = emptyList()
+            }
+            _isExplorerLoading.value = false
+        }
+    }
+
+    private fun loadCurrentSmbDirectory() {
+        val mount = activeSmbMount ?: return
+        val loc = currentSmbLocation ?: return
+        val query = _fileSearchQuery.value.trim()
+        val creds = runCatching {
+            SmbRepository.Credentials(mount.username, mount.password, mount.domain)
+        }.getOrElse { err ->
+            _explorerError.value = err.message
             return
         }
 
-        val dir = _currentDir.value
-        _breadcrumbs.value = container.fileExplorerRepository.buildBreadcrumbs(dir)
-        _fileEntries.value = container.fileExplorerRepository.listDirectory(
-            directory = dir,
-            showHidden = s.showHiddenFiles,
-            searchQuery = _fileSearchQuery.value,
-            sortField = s.sortField,
-            sortAscending = s.sortAscending,
-            historyByUri = historyMap
-        )
+        explorerLoadJob?.cancel()
+        explorerLoadJob = viewModelScope.launch {
+            _isExplorerLoading.value = true
+            _explorerError.value = null
+            _breadcrumbs.value = buildSmbBreadcrumbs(mount.name, loc)
+            try {
+                val smbEntries = container.smbRepository.list(loc, creds)
+                val mapped = smbEntries.mapNotNull { entry ->
+                    if (query.isNotEmpty() && !entry.name.contains(query, ignoreCase = true)) {
+                        return@mapNotNull null
+                    }
+                    FileEntry(
+                        name = entry.name,
+                        path = entry.location.uri,
+                        uriString = entry.location.uri,
+                        isDirectory = entry.isFolder,
+                        sizeBytes = entry.size,
+                        isVideoFile = !entry.isFolder && !entry.isSubtitle,
+                        isSubtitleFile = entry.isSubtitle,
+                        sidecarSubtitles = entry.sidecarSubtitles,
+                        videoItem = if (!entry.isFolder && !entry.isSubtitle) {
+                            entry.asVideo().copy(mountSourceId = mount.id)
+                        } else {
+                            null
+                        }
+                    )
+                }
+                _fileEntries.value = mapped
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                _explorerError.value = err.message ?: "SMB 连接失败，请检查网络和账号权限"
+                _fileEntries.value = emptyList()
+            } finally {
+                _isExplorerLoading.value = false
+            }
+        }
     }
 
-    fun openSafRootBookmark(context: Context, bookmark: SafRootBookmark) {
-        _activeSafTreeUri.value = bookmark.treeUriString
-        refreshFileExplorer(context)
+    private fun buildSmbBreadcrumbs(mountName: String, loc: SmbLocation): List<BreadcrumbSegment> {
+        val list = mutableListOf<BreadcrumbSegment>()
+        val serverLoc = loc.serverRoot()
+        list.add(BreadcrumbSegment(label = mountName, path = serverLoc.uri, stackIndex = 0))
+        if (loc.share != null) {
+            var running = serverLoc.child(loc.share)
+            list.add(BreadcrumbSegment(label = loc.share, path = running.uri, stackIndex = list.size))
+            loc.segments.forEach { seg ->
+                running = running.child(seg)
+                list.add(BreadcrumbSegment(label = seg, path = running.uri, stackIndex = list.size))
+            }
+        }
+        return list
     }
 
-    fun registerSafTree(context: Context, treeUri: Uri) {
-        val doc = DocumentFile.fromTreeUri(context, treeUri)
-        val label = doc?.name?.ifBlank { "外接存储目录" } ?: "外接存储目录"
-        val bookmark = SafRootBookmark(name = label, treeUriString = treeUri.toString())
-        container.settingsRepository.addSafRoot(bookmark)
-        _activeSafTreeUri.value = treeUri.toString()
-        _selectedTab.value = MainNavTab.FILES
-        refreshFileExplorer(context)
+    private fun loadCurrentWebDavDirectory() {
+        val mount = activeWebDavMount ?: return
+        val currentUrl = webDavStack.lastOrNull()?.second ?: return
+        val query = _fileSearchQuery.value
+
+        explorerLoadJob?.cancel()
+        explorerLoadJob = viewModelScope.launch {
+            _isExplorerLoading.value = true
+            _explorerError.value = null
+            _breadcrumbs.value = webDavStack.mapIndexed { idx, (label, url) ->
+                BreadcrumbSegment(label = label, path = url, stackIndex = idx)
+            }
+            try {
+                _fileEntries.value = container.webDavRepository.listDirectory(mount, currentUrl, query)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                _explorerError.value = err.message ?: "WebDAV 读取失败，请检查地址与账号密码"
+                _fileEntries.value = emptyList()
+            } finally {
+                _isExplorerLoading.value = false
+            }
+        }
+    }
+
+    private fun loadCurrentQuarkDirectory() {
+        val mount = activeQuarkMount ?: return
+        val currentFid = quarkStack.lastOrNull()?.second ?: "0"
+        val query = _fileSearchQuery.value
+
+        explorerLoadJob?.cancel()
+        explorerLoadJob = viewModelScope.launch {
+            _isExplorerLoading.value = true
+            _explorerError.value = null
+            _breadcrumbs.value = quarkStack.mapIndexed { idx, (label, fid) ->
+                BreadcrumbSegment(label = label, path = fid, stackIndex = idx)
+            }
+            try {
+                _fileEntries.value = container.quarkDriveRepository.listFolder(mount, currentFid, query)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                _explorerError.value = err.message ?: "夸克网盘读取失败，请检查登录状态或 Cookie"
+                _fileEntries.value = emptyList()
+            } finally {
+                _isExplorerLoading.value = false
+            }
+        }
     }
 
     fun toggleCurrentDirectoryFavorite() {
-        val saf = _activeSafTreeUri.value
-        if (saf != null) {
-            val label = _breadcrumbs.value.lastOrNull()?.label ?: "授权目录"
-            container.settingsRepository.toggleFavoriteFolder(
-                FavoriteFolder(name = label, path = saf, isSafUri = true)
-            )
-        } else {
-            val dir = _currentDir.value
-            container.settingsRepository.toggleFavoriteFolder(
-                FavoriteFolder(name = dir.name.ifBlank { "内部存储" }, path = dir.absolutePath, isSafUri = false)
-            )
+        when (_explorerBackend.value) {
+            ExplorerBackend.SAF -> {
+                val saf = _activeSafTreeUri.value ?: return
+                val label = _breadcrumbs.value.lastOrNull()?.label ?: "授权目录"
+                container.settingsRepository.toggleFavoriteFolder(
+                    FavoriteFolder(name = label, path = saf, isSafUri = true)
+                )
+            }
+            ExplorerBackend.LOCAL -> {
+                val dir = _currentDir.value
+                container.settingsRepository.toggleFavoriteFolder(
+                    FavoriteFolder(
+                        name = dir.name.ifBlank { "内部存储" },
+                        path = dir.absolutePath,
+                        isSafUri = false
+                    )
+                )
+            }
+            else -> Unit
         }
     }
 
@@ -363,13 +744,15 @@ class MainViewModel(
         forceFromBeginning: Boolean = false,
         inlineInitialSrt: String? = null
     ) {
-        val playlist = if (Uri.parse(video.uriString).scheme == "smb") {
-            _networkBrowser.value.entries.filterNot { it.isFolder }.map { it.asVideo() }
-                .takeIf { items -> items.any { it.uriString == video.uriString } } ?: listOf(video)
-        } else container.fileExplorerRepository.findSiblingEpisodePlaylist(
-            currentVideo = video,
-            libraryFallback = _rawLibraryVideos.value
-        )
+        val currentFolderVideos = _fileEntries.value.mapNotNull { it.videoItem }
+        val playlist = if (currentFolderVideos.any { it.uriString == video.uriString }) {
+            currentFolderVideos
+        } else {
+            container.fileExplorerRepository.findSiblingEpisodePlaylist(
+                currentVideo = video,
+                libraryFallback = _rawLibraryVideos.value
+            )
+        }
         _activeLaunch.value = ActivePlaybackLaunch(
             video = video,
             playlist = playlist,
@@ -418,7 +801,9 @@ class MainViewModel(
     fun closePlayer() {
         _activeLaunch.value = null
         refreshMediaLibrary()
-        refreshFileExplorer()
+        if (_explorerBackend.value == ExplorerBackend.LOCAL) {
+            refreshFileExplorer()
+        }
     }
 
     fun clearHistory() {

@@ -228,15 +228,52 @@ class PlayerViewModel(
                 onlineQuery = cleanedQuery
             )
         }
-        playerController.loadVideo(video.uriString, video.title, resumeMs)
         playerController.setPlaybackSpeed(initialSpeed)
 
-        // Auto-load saved external subtitle, sidecar subtitle, or inline demo subtitle
+        // Resolve Quark Drive stream URL dynamically or load Local / SAF / SMB / WebDAV / HTTP directly
+        if (video.uriString.startsWith("quark://")) {
+            val mountId = video.mountSourceId
+            val fid = video.remoteFileId ?: video.uriString.substringAfterLast('/')
+            val mount = mountId?.let { container.settingsRepository.getMountedSource(it) }
+            if (mount != null && fid.isNotBlank()) {
+                val gen = playbackGeneration
+                postMessage("正在解析夸克网盘高速直链…")
+                viewModelScope.launch {
+                    runCatching { container.quarkDriveRepository.resolveStreamUrl(mount, fid) }
+                        .onSuccess { (streamUrl, headers) ->
+                            if (gen == playbackGeneration) {
+                                playerController.loadVideo(streamUrl, video.title, resumeMs, headers)
+                            }
+                        }
+                        .onFailure { err ->
+                            if (gen == playbackGeneration) {
+                                postMessage(err.message ?: "夸克网盘直链解析失败，请重新登录")
+                            }
+                        }
+                }
+            } else {
+                postMessage("找不到对应的夸克网盘挂载源，请重新挂载")
+            }
+        } else {
+            val headers = video.httpHeaders.ifEmpty {
+                video.mountSourceId
+                    ?.let { container.settingsRepository.getMountedSource(it) }
+                    ?.takeIf { it.type == com.padvideo.data.model.StorageMountType.WEBDAV }
+                    ?.let { container.webDavRepository.buildAuthHeaders(it) }
+                    ?: emptyMap()
+            }
+            if (video.uriString.startsWith("smb://")) {
+                container.smbRepository.registerSavedMounts(container.settingsRepository.mountedSources.value)
+            }
+            playerController.loadVideo(video.uriString, video.title, resumeMs, headers)
+        }
+
+        // Auto-load saved external subtitle, sidecar subtitle (local/SAF/SMB/WebDAV/Quark), or inline demo subtitle
         val preferredSubPath = savedHistory?.externalSubtitlePath?.takeIf { File(it).exists() }
-            ?: video.sidecarSubtitlePaths.firstOrNull { File(it).exists() }
+            ?: video.sidecarSubtitlePaths.firstOrNull()
 
         if (preferredSubPath != null) {
-            loadExternalSubtitleFile(File(preferredSubPath), silent = true)
+            loadSidecarSubtitlePath(preferredSubPath, video)
         } else if (!launch.inlineInitialSrt.isNullOrBlank()) {
             val demoCues = SubtitleParser.parseText(launch.inlineInitialSrt, "demo.srt")
             _uiState.update {
@@ -255,6 +292,80 @@ class PlayerViewModel(
 
         if (resumeMs > 0L) {
             postMessage("已自动恢复上次播放进度 ${formatDurationMs(resumeMs)}")
+        }
+    }
+
+    private fun loadSidecarSubtitlePath(pathOrUri: String, video: VideoItem) {
+        val gen = playbackGeneration
+        when {
+            pathOrUri.startsWith("content://") -> {
+                loadExternalSubtitleUri(Uri.parse(pathOrUri))
+            }
+            pathOrUri.startsWith("smb://") -> {
+                viewModelScope.launch {
+                    runCatching {
+                        val loc = com.padvideo.data.repository.SmbLocation.parse(pathOrUri)
+                        val bytes = container.smbRepository.readSmallFileBytes(loc)
+                        val cues = SubtitleParser.parseBytes(bytes, loc.segments.lastOrNull() ?: "smb.srt")
+                        if (gen == playbackGeneration && cues.isNotEmpty()) {
+                            applyLoadedExternalCues(cues, null)
+                        }
+                    }
+                }
+            }
+            pathOrUri.startsWith("http://") || pathOrUri.startsWith("https://") -> {
+                viewModelScope.launch {
+                    runCatching {
+                        val headers = video.httpHeaders.ifEmpty {
+                            video.mountSourceId
+                                ?.let { container.settingsRepository.getMountedSource(it) }
+                                ?.let { container.webDavRepository.buildAuthHeaders(it) }
+                                ?: emptyMap()
+                        }
+                        val bytes = container.webDavRepository.downloadBytes(pathOrUri, headers)
+                        val cues = SubtitleParser.parseBytes(bytes, pathOrUri.substringAfterLast('/'))
+                        if (gen == playbackGeneration && cues.isNotEmpty()) {
+                            applyLoadedExternalCues(cues, null)
+                        }
+                    }
+                }
+            }
+            pathOrUri.startsWith("quark://") -> {
+                val mount = video.mountSourceId?.let { container.settingsRepository.getMountedSource(it) } ?: return
+                val parts = pathOrUri.removePrefix("quark://").split('/')
+                val subFid = parts.getOrNull(1) ?: return
+                val subName = parts.getOrNull(2) ?: "quark.srt"
+                viewModelScope.launch {
+                    runCatching {
+                        val bytes = container.quarkDriveRepository.downloadSubtitleBytes(mount, subFid)
+                        val cues = SubtitleParser.parseBytes(bytes, subName)
+                        if (gen == playbackGeneration && cues.isNotEmpty()) {
+                            applyLoadedExternalCues(cues, null)
+                        }
+                    }
+                }
+            }
+            else -> {
+                val f = File(pathOrUri)
+                if (f.exists()) loadExternalSubtitleFile(f, silent = true)
+            }
+        }
+    }
+
+    private fun applyLoadedExternalCues(cues: List<SubtitleCue>, savedPath: String?) {
+        playerController.selectEmbeddedSubtitleTrack(null)
+        resetTranslationWork()
+        _uiState.update {
+            it.copy(
+                externalCues = cues,
+                activeExternalSubtitlePath = savedPath,
+                subtitlesEnabled = true
+            )
+        }
+        val mode = settings.value.translationConfig.displayMode
+        if (mode == TranslationDisplayMode.BILINGUAL || mode == TranslationDisplayMode.TARGET_ONLY) {
+            val idx = SubtitleParser.findCueIndexAtOrAfter(cues, _uiState.value.positionMs).coerceAtLeast(0)
+            triggerLookaheadTranslation(idx, force = true)
         }
     }
 
@@ -403,10 +514,10 @@ class PlayerViewModel(
 
     private fun translationError(config: TranslationConfig, error: Throwable): String =
         if (config.engine == TranslationEngineType.MLKIT_OFFLINE) {
-            error.message?.takeIf { it.startsWith("请") || it.startsWith("端侧") }
-                ?: "离线翻译失败，请检查源语言和离线模型"
+            error.message?.takeIf { it.startsWith("请") || it.startsWith("端侧") || it.startsWith("尚未") }
+                ?: "离线翻译失败：${error.message ?: "请检查源语言和离线模型"}"
         } else {
-            "实时翻译失败，请检查网络或翻译引擎设置"
+            "实时翻译失败：${error.message?.take(60) ?: "请检查网络或切换翻译引擎"}"
         }
 
     private fun formatDisplayLines(
@@ -676,6 +787,13 @@ class PlayerViewModel(
             startLiveSpeech(settings.value.translationConfig)
         } else {
             liveSpeechEngine.stop()
+            if (mode == TranslationDisplayMode.BILINGUAL || mode == TranslationDisplayMode.TARGET_ONLY) {
+                val hasExternal = _uiState.value.externalCues.isNotEmpty()
+                val hasEmbedded = playerController.embeddedSubtitleTracks.value.isNotEmpty()
+                if (!hasExternal && !hasEmbedded) {
+                    postMessage("当前视频无内嵌/外挂字幕，请点「在线字幕」匹配或切换「麦克风语音同传」")
+                }
+            }
         }
     }
 
@@ -711,11 +829,35 @@ class PlayerViewModel(
         }
     }
 
+    fun loadDownloadedOfflineLanguages(onLoaded: (Set<String>) -> Unit) {
+        viewModelScope.launch {
+            onLoaded(container.translationRepository.getDownloadedOfflineModelCodes())
+        }
+    }
+
+    fun downloadOfflineLanguagePack(langTag: String, onResult: (String, Set<String>) -> Unit) {
+        viewModelScope.launch {
+            container.translationRepository.downloadOfflineLanguagePack(langTag).onSuccess {
+                val codes = container.translationRepository.getDownloadedOfflineModelCodes()
+                onResult("离线语言包 ($langTag) 已下载就绪", codes)
+                resetTranslationWork()
+                if (_uiState.value.externalCues.isEmpty()) {
+                    handleLiveEmbeddedCueUpdate(playerController.liveEmbeddedSubtitleCue.value)
+                } else {
+                    updateActiveSubtitleAtPosition(playerController.exoPlayer.currentPosition.coerceAtLeast(0L))
+                }
+            }.onFailure { err ->
+                val codes = container.translationRepository.getDownloadedOfflineModelCodes()
+                onResult("模型下载失败（需可访问 Google ML Kit 服务）：${err.message ?: "请检查网络"}", codes)
+            }
+        }
+    }
+
     fun downloadMlKitOfflinePack(onResult: (String) -> Unit) {
         val config = settings.value.translationConfig
         viewModelScope.launch {
             container.translationRepository.downloadOfflinePair(config).onSuccess {
-                onResult("这组语言的离线模型已就绪")
+                onResult("离线模型已就绪，可断网实时翻译")
                 if (settings.value.translationConfig == config) {
                     resetTranslationWork()
                     if (_uiState.value.externalCues.isEmpty()) {
@@ -725,7 +867,7 @@ class PlayerViewModel(
                     }
                 }
             }.onFailure { error ->
-                onResult("模型下载失败：${error.message ?: "请检查网络和存储空间"}")
+                onResult("模型下载失败（需访问 Google ML Kit；无代理建议用「智能云端多引擎」）：${error.message ?: ""}")
             }
         }
     }

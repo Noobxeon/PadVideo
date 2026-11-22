@@ -18,6 +18,9 @@ data class VideoItem(
     val dateModifiedSec: Long = 0L,
     val mimeType: String = "video/*",
     val sidecarSubtitlePaths: List<String> = emptyList(),
+    val httpHeaders: Map<String, String> = emptyMap(),
+    val mountSourceId: String? = null,
+    val remoteFileId: String? = null,
     val lastPositionMs: Long = 0L,
     val lastPlayedAtMs: Long = 0L
 ) {
@@ -60,13 +63,15 @@ data class FileEntry(
     val isVideoFile: Boolean = false,
     val isSubtitleFile: Boolean = false,
     val sidecarSubtitles: List<String> = emptyList(),
+    val remoteId: String? = null,
     val videoItem: VideoItem? = null
 )
 
 data class BreadcrumbSegment(
     val label: String,
     val path: String,
-    val isSafUri: Boolean = false
+    val isSafUri: Boolean = false,
+    val stackIndex: Int = -1
 )
 
 @Serializable

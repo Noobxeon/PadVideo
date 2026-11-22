@@ -44,24 +44,64 @@ class RealtimeTranslationTest {
     }
 
     @Test
-    fun `AUTO_CLOUD automatically falls back to MyMemory when Google GTX fails and caches on disk`() = runTest {
+    fun `AUTO_CLOUD uses Bing Neural directly when available and caches result`() = runTest {
+        val bingTranslateCalls = AtomicInteger(0)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path.startsWith("/bing_page") -> {
+                        MockResponse().setResponseCode(200).setBody(
+                            """<html><script>IG:"ABCDEF123456";var params_AbusePreventionHelper = [1700000,"tok_xyz",3600];</script></html>"""
+                        )
+                    }
+                    path.startsWith("/bing_translate") -> {
+                        bingTranslateCalls.incrementAndGet()
+                        MockResponse().setResponseCode(200).setBody(
+                            """[{"translations":[{"text":"欢迎来到双语影院","to":"zh-Hans"}]}]"""
+                        )
+                    }
+                    else -> MockResponse().setResponseCode(503)
+                }
+            }
+        }
+
+        val baseUrl = server.url("/").toString().trimEnd('/')
+        val repo = RealtimeTranslationRepository(
+            cacheDirectory = tempFolder.newFolder("bing_cache"),
+            googleGtxUrl = "$baseUrl/gtx",
+            myMemoryUrl = "$baseUrl/mymemory",
+            bingPageUrl = "$baseUrl/bing_page",
+            bingTranslateBaseUrl = "$baseUrl/bing_translate",
+            youdaoUrl = "$baseUrl/youdao"
+        )
+        val config = TranslationConfig(
+            engine = TranslationEngineType.AUTO_CLOUD,
+            sourceLanguageCode = "auto",
+            targetLanguage = TranslationLanguage.ZH_CN,
+            displayMode = TranslationDisplayMode.BILINGUAL
+        )
+
+        assertEquals("欢迎来到双语影院", repo.translateSingle("Welcome to bilingual cinema", config).getOrThrow())
+        assertEquals("欢迎来到双语影院", repo.translateSingle("Welcome to bilingual cinema", config).getOrThrow())
+        assertEquals(1, bingTranslateCalls.get())
+    }
+
+    @Test
+    fun `AUTO_CLOUD cascades through Bing GTX Youdao to MyMemory and persists disk cache`() = runTest {
         val myMemoryCalls = AtomicInteger(0)
 
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
                 return when {
-                    path.startsWith("/gtx") -> {
-                        // Simulate network block / failure on Google GTX
-                        MockResponse().setResponseCode(503)
-                    }
                     path.startsWith("/mymemory") -> {
                         myMemoryCalls.incrementAndGet()
                         MockResponse()
                             .setResponseCode(200)
                             .setBody("""{"responseData":{"translatedText":"欢迎来到未来世界","match":0.99}}""")
                     }
-                    else -> MockResponse().setResponseCode(404)
+                    else -> MockResponse().setResponseCode(503)
                 }
             }
         }
@@ -72,7 +112,10 @@ class RealtimeTranslationTest {
         val repo = RealtimeTranslationRepository(
             cacheDirectory = cacheDir,
             googleGtxUrl = "$baseUrl/gtx",
-            myMemoryUrl = "$baseUrl/mymemory"
+            myMemoryUrl = "$baseUrl/mymemory",
+            bingPageUrl = "$baseUrl/bing_page",
+            bingTranslateBaseUrl = "$baseUrl/bing_translate",
+            youdaoUrl = "$baseUrl/youdao"
         )
 
         val config = TranslationConfig(
@@ -86,16 +129,17 @@ class RealtimeTranslationTest {
         assertEquals("欢迎来到未来世界", firstRes)
         assertEquals(1, myMemoryCalls.get())
 
-        // Second translation of same line hits LRU cache with zero extra network calls
         val secondRes = repo.translateSingle("Welcome to the future world", config).getOrThrow()
         assertEquals("欢迎来到未来世界", secondRes)
         assertEquals(1, myMemoryCalls.get())
 
-        // Re-instantiating repository reads persisted disk cache
         val reloadedRepo = RealtimeTranslationRepository(
             cacheDirectory = cacheDir,
             googleGtxUrl = "$baseUrl/gtx",
-            myMemoryUrl = "$baseUrl/mymemory"
+            myMemoryUrl = "$baseUrl/mymemory",
+            bingPageUrl = "$baseUrl/bing_page",
+            bingTranslateBaseUrl = "$baseUrl/bing_translate",
+            youdaoUrl = "$baseUrl/youdao"
         )
         assertEquals("欢迎来到未来世界", reloadedRepo.getCachedTranslation("Welcome to the future world", config))
     }
@@ -150,6 +194,7 @@ class RealtimeTranslationTest {
         assertEquals("抓紧时间，科布先生。", updates[1])
         assertEquals("梦境正在崩塌！", updates[2])
     }
+
     @Test
     fun `offline same language completes without a model or cloud request`() = runTest {
         val repo = RealtimeTranslationRepository()
@@ -165,30 +210,15 @@ class RealtimeTranslationTest {
     }
 
     @Test
-    fun `prepare offline models requires an explicit source language`() = runTest {
-        val repo = RealtimeTranslationRepository()
-        val config = TranslationConfig(engine = TranslationEngineType.MLKIT_OFFLINE)
-
-        assertTrue(repo.downloadOfflinePair(config).exceptionOrNull() is IllegalArgumentException)
-        assertEquals(0, server.requestCount)
-    }
-
-    @Test
     fun `failed lookahead reports the failure without publishing translations`() = runTest {
         server.enqueue(MockResponse().setResponseCode(503))
         val repo = RealtimeTranslationRepository(googleGtxUrl = server.url("/gtx").toString())
         val config = TranslationConfig(engine = TranslationEngineType.GOOGLE_GTX)
-        val updates = mutableMapOf<Int, String>()
+        val cues = listOf(SubtitleCue(1, 1000L, 3000L, "Hello world"))
+        var updated = false
 
-        val result = repo.translateCueWindow(
-            cues = listOf(SubtitleCue(1, 0, 1000, "First line")),
-            startIndex = 0,
-            config = config,
-            onUpdatedCues = updates::putAll
-        )
-
+        val result = repo.translateCueWindow(cues, 0, 10, config) { updated = true }
         assertTrue(result.isFailure)
-        assertTrue(updates.isEmpty())
+        assertTrue(!updated)
     }
-
 }

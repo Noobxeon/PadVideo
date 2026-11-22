@@ -3,6 +3,8 @@ package com.padvideo.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,7 +42,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -52,7 +53,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.padvideo.data.model.AppSettings
 import com.padvideo.data.model.SortField
@@ -63,6 +67,7 @@ import com.padvideo.ui.components.TabletVideoInspectorPane
 import com.padvideo.ui.components.VideoGridCard
 import com.padvideo.ui.components.VideoListRow
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MediaLibraryScreen(
     videos: List<VideoItem>,
@@ -88,31 +93,44 @@ fun MediaLibraryScreen(
     modifier: Modifier = Modifier
 ) {
     var showSortMenu by remember { mutableStateOf(false) }
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val isCompact = screenWidthDp < 720
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .padding(horizontal = if (isCompact) 14.dp else 20.dp, vertical = 12.dp)
     ) {
-        // Tablet Header & Search Bar
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "平板影院媒体库",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "共发现 ${videos.size} 部本地视频 · 支持实时双语字幕与在线搜字幕",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+        // Responsive Header: 2 clean rows on portrait / compact, 1 row on landscape tablet
+        if (isCompact) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "平板影院媒体库",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "共 ${videos.size} 部本地视频",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                LibraryActionIcons(
+                    settings = settings,
+                    showSortMenu = showSortMenu,
+                    onShowSortMenuChange = { showSortMenu = it },
+                    onUpdateSort = onUpdateSort,
+                    onToggleLayout = onToggleLayout,
+                    onRefresh = onRefresh
                 )
             }
-
+            Spacer(modifier = Modifier.height(8.dp))
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
@@ -126,64 +144,69 @@ fun MediaLibraryScreen(
                         }
                     }
                 },
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer
                 ),
-                modifier = Modifier.width(if (isExpandedTabletWidth) 320.dp else 220.dp)
+                modifier = Modifier.fillMaxWidth()
             )
-
-            Box {
-                IconButton(onClick = { showSortMenu = true }) {
-                    Icon(Icons.AutoMirrored.Outlined.Sort, contentDescription = "排序方式")
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "平板影院媒体库",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "共发现 ${videos.size} 部本地视频 · 支持实时双语字幕与在线搜字幕",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-                DropdownMenu(
-                    expanded = showSortMenu,
-                    onDismissRequest = { showSortMenu = false }
-                ) {
-                    SortField.entries.forEach { field ->
-                        val isCurrent = settings.sortField == field
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    buildString {
-                                        append(field.label)
-                                        if (isCurrent) {
-                                            append(if (settings.sortAscending) " (升序 ↑)" else " (降序 ↓)")
-                                        }
-                                    }
-                                )
-                            },
-                            onClick = {
-                                val nextAsc = if (isCurrent) !settings.sortAscending else (field == SortField.NAME)
-                                onUpdateSort(field, nextAsc)
-                                showSortMenu = false
+
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    placeholder = { Text("搜索影片或目录…") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearchQueryChange("") }) {
+                                Icon(Icons.Outlined.Clear, contentDescription = "清除")
                             }
-                        )
-                    }
-                }
-            }
-
-            IconButton(onClick = onToggleLayout) {
-                Icon(
-                    imageVector = if (settings.viewLayoutMode == ViewLayoutMode.GRID) {
-                        Icons.AutoMirrored.Outlined.ViewList
-                    } else {
-                        Icons.Outlined.GridView
+                        }
                     },
-                    contentDescription = "切换网格或列表视图"
+                    shape = RoundedCornerShape(28.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer
+                    ),
+                    modifier = Modifier.width(if (isExpandedTabletWidth) 300.dp else 220.dp)
                 )
-            }
 
-            IconButton(onClick = onRefresh) {
-                Icon(Icons.Outlined.Refresh, contentDescription = "刷新媒体库")
+                LibraryActionIcons(
+                    settings = settings,
+                    showSortMenu = showSortMenu,
+                    onShowSortMenuChange = { showSortMenu = it },
+                    onUpdateSort = onUpdateSort,
+                    onToggleLayout = onToggleLayout,
+                    onRefresh = onRefresh
+                )
             }
         }
 
         // Folder Filter Chips
         if (folders.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item {
                     FilterChip(
@@ -211,42 +234,73 @@ fun MediaLibraryScreen(
 
         // Permission Banner if not yet granted
         if (!hasMediaPermission) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.VideoLibrary,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
+                if (isCompact) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.VideoLibrary,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "授权读取本地视频媒体库",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
                         Text(
-                            text = "授权读取平板视频媒体库",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        Text(
-                            text = "授予视频读取权限后可自动聚合平板上的电影与剧集；也可免权限直接打开单个文件或在线测试流。",
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = "授权后自动聚合本地影片；也可前往「文件浏览」挂载 Windows 共享、NAS 与夸克网盘。",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                         )
+                        Button(onClick = onRequestMediaPermission, shape = RoundedCornerShape(12.dp)) {
+                            Text("立即授权")
+                        }
                     }
-                    Button(onClick = onRequestMediaPermission) {
-                        Text("立即授权")
+                } else {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.VideoLibrary,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "授权读取平板视频媒体库",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "授予视频读取权限后可自动聚合平板上的电影与剧集；也可免权限打开单文件或挂载网盘/NAS。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                            )
+                        }
+                        Button(onClick = onRequestMediaPermission) {
+                            Text("立即授权")
+                        }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         if (isScanning && videos.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -258,7 +312,6 @@ fun MediaLibraryScreen(
                 onOpenStreamSamples = onOpenStreamSamples
             )
         } else {
-            // Canonical Tablet Master-Detail Split Layout on Expanded Widths
             Row(
                 modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(18.dp)
@@ -266,10 +319,10 @@ fun MediaLibraryScreen(
                 Box(modifier = Modifier.weight(if (isExpandedTabletWidth && selectedInspectorVideo != null) 0.68f else 1f)) {
                     if (settings.viewLayoutMode == ViewLayoutMode.GRID) {
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 250.dp),
+                            columns = GridCells.Adaptive(minSize = if (screenWidthDp < 600) 156.dp else 240.dp),
                             contentPadding = PaddingValues(bottom = 24.dp),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(videos, key = { it.uriString }) { video ->
                                 VideoGridCard(
@@ -315,6 +368,65 @@ fun MediaLibraryScreen(
 }
 
 @Composable
+private fun LibraryActionIcons(
+    settings: AppSettings,
+    showSortMenu: Boolean,
+    onShowSortMenuChange: (Boolean) -> Unit,
+    onUpdateSort: (SortField, Boolean) -> Unit,
+    onToggleLayout: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box {
+            IconButton(onClick = { onShowSortMenuChange(true) }) {
+                Icon(Icons.AutoMirrored.Outlined.Sort, contentDescription = "排序方式")
+            }
+            DropdownMenu(
+                expanded = showSortMenu,
+                onDismissRequest = { onShowSortMenuChange(false) }
+            ) {
+                SortField.entries.forEach { field ->
+                    val isCurrent = settings.sortField == field
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                buildString {
+                                    append(field.label)
+                                    if (isCurrent) {
+                                        append(if (settings.sortAscending) " (升序 ↑)" else " (降序 ↓)")
+                                    }
+                                }
+                            )
+                        },
+                        onClick = {
+                            val nextAsc = if (isCurrent) !settings.sortAscending else (field == SortField.NAME)
+                            onUpdateSort(field, nextAsc)
+                            onShowSortMenuChange(false)
+                        }
+                    )
+                }
+            }
+        }
+
+        IconButton(onClick = onToggleLayout) {
+            Icon(
+                imageVector = if (settings.viewLayoutMode == ViewLayoutMode.GRID) {
+                    Icons.AutoMirrored.Outlined.ViewList
+                } else {
+                    Icons.Outlined.GridView
+                },
+                contentDescription = "切换网格或列表视图"
+            )
+        }
+
+        IconButton(onClick = onRefresh) {
+            Icon(Icons.Outlined.Refresh, contentDescription = "刷新媒体库")
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun EmptyLibraryState(
     onPickSingleVideo: () -> Unit,
     onOpenStreamSamples: () -> Unit
@@ -323,25 +435,30 @@ private fun EmptyLibraryState(
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(32.dp)
+            modifier = Modifier.padding(24.dp)
         ) {
             Icon(
                 imageVector = Icons.Outlined.VideoLibrary,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(64.dp)
+                modifier = Modifier.size(60.dp)
             )
             Text(
                 text = "暂未发现本地视频文件",
-                style = MaterialTheme.typography.titleLarge
+                style = MaterialTheme.typography.titleLarge,
+                textAlign = TextAlign.Center
             )
             Text(
-                text = "您可以通过「文件浏览」挂载目录、直接选取视频文件，或一键播放内置开源高清短片体验实时双语翻译",
+                text = "可在「文件浏览」挂载本地目录、Windows 共享、局域网 NAS 或夸克网盘，或先试播开源样片",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Button(onClick = onPickSingleVideo, shape = RoundedCornerShape(14.dp)) {
                     Icon(Icons.Outlined.FileOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))

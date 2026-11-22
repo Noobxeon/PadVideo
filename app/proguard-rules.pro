@@ -1,18 +1,9 @@
 # PadVideo ProGuard / R8 Rules
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
 
-# Kotlinx Serialization
+# Kotlinx Serialization (official AAR rules are bundled automatically)
+-keepattributes *Annotation*, InnerClasses
 -keepclassmembers class kotlinx.serialization.json.** { *; }
--if @kotlinx.serialization.Serializable class **
--keepclassmembers class <1> {
-    static <1>$Companion Companion;
-}
--if @kotlinx.serialization.Serializable class ** {
-    static **$* *;
-}
--keepclassmembers class <2>$<3> {
-    kotlinx.serialization.KSerializer serializer(...);
-}
 
 # PadVideo Data Models
 -keep class com.padvideo.data.model.** { *; }
@@ -29,15 +20,27 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
-# Google ML Kit Translate
+# Google ML Kit Translate & Language ID
 -keep class com.google.mlkit.** { *; }
 -dontwarn com.google.mlkit.**
 -keep class com.google.android.gms.** { *; }
 -dontwarn com.google.android.gms.**
 
-# SMBJ uses NTLM on Android. GSS and MBassador's expression filters are JVM-only optional paths.
+# SMBJ, NTLM, BouncyCastle crypto & DCERPC Windows Share Enumeration
 -dontwarn org.ietf.jgss.**
 -dontwarn javax.el.**
+-dontwarn java.rmi.**
+-dontwarn com.hierynomus.**
+-dontwarn com.rapid7.**
+-dontwarn net.engio.mbassy.**
+-keep class com.hierynomus.smbj.** { *; }
+-keep class com.hierynomus.security.** { *; }
+-keep class com.hierynomus.ntlm.** { *; }
+-keep class com.hierynomus.spnego.** { *; }
+-keep class com.rapid7.client.dcerpc.** { *; }
+-keep class com.padvideo.data.repository.SmbRpcDecodingException { *; }
+-keep class org.bouncycastle.jce.provider.** { *; }
+-keep class org.bouncycastle.crypto.** { *; }
 -keepclassmembers class com.hierynomus.smbj.** {
     @net.engio.mbassy.listener.Handler <methods>;
 }

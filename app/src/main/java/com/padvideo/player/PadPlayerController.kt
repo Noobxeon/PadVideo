@@ -25,6 +25,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.padvideo.data.repository.SmbRepository
 import androidx.media3.session.MediaSession
@@ -227,11 +229,30 @@ class PadPlayerController internal constructor(
 
         _audioTracks.value = audios
         _embeddedSubtitleTracks.value = subs
+
+        // Auto-select first embedded text track when text tracks are enabled and none is active yet,
+        // so MKV/MP4 embedded subtitles and real-time translation work out of the box.
+        val textTrackDisabled = exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+        if (!textTrackDisabled && subs.isNotEmpty() && subs.none { it.isSelected }) {
+            selectEmbeddedSubtitleTrack(subs.first())
+        }
     }
 
-    fun loadVideo(uriString: String, title: String, startPositionMs: Long = 0L) {
+    fun loadVideo(
+        uriString: String,
+        title: String,
+        startPositionMs: Long = 0L,
+        httpHeaders: Map<String, String> = emptyMap()
+    ) {
         _playbackError.value = null
         _liveEmbeddedSubtitleCue.value = ""
+
+        // Re-enable text tracks cleanly on each new video load (external subtitle loader will disable if mounted)
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .build()
+
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uriString))
             .setMediaMetadata(
@@ -242,11 +263,24 @@ class PadPlayerController internal constructor(
             .build()
 
         val startPosition = startPositionMs.coerceAtLeast(0L)
-        if (mediaItem.localConfiguration?.uri?.scheme == "smb") {
-            val source = ProgressiveMediaSource.Factory(DataSource.Factory { SmbDataSource(smbRepository) })
-            exoPlayer.setMediaSource(source.createMediaSource(mediaItem), startPosition)
-        } else {
-            exoPlayer.setMediaItem(mediaItem, startPosition)
+        val scheme = mediaItem.localConfiguration?.uri?.scheme?.lowercase(Locale.ROOT)
+        when {
+            scheme == "smb" -> {
+                val source = ProgressiveMediaSource.Factory(DataSource.Factory { SmbDataSource(smbRepository) })
+                exoPlayer.setMediaSource(source.createMediaSource(mediaItem), startPosition)
+            }
+            (scheme == "http" || scheme == "https") && httpHeaders.isNotEmpty() -> {
+                val httpFactory = DefaultHttpDataSource.Factory()
+                    .setAllowCrossProtocolRedirects(true)
+                    .setConnectTimeoutMs(12_000)
+                    .setReadTimeoutMs(20_000)
+                    .setDefaultRequestProperties(httpHeaders)
+                val mediaSource = DefaultMediaSourceFactory(httpFactory).createMediaSource(mediaItem)
+                exoPlayer.setMediaSource(mediaSource, startPosition)
+            }
+            else -> {
+                exoPlayer.setMediaItem(mediaItem, startPosition)
+            }
         }
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true

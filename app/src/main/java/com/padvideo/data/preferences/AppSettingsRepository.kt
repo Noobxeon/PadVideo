@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.padvideo.data.model.AppSettings
 import com.padvideo.data.model.FavoriteFolder
+import com.padvideo.data.model.MountedStorageSource
 import com.padvideo.data.model.PlaybackHistoryItem
 import com.padvideo.data.model.SafRootBookmark
 import com.padvideo.data.model.VideoBookmark
@@ -39,6 +40,9 @@ class AppSettingsRepository(context: Context) {
     private val _bookmarks = MutableStateFlow(loadBookmarks())
     val bookmarks: StateFlow<List<VideoBookmark>> = _bookmarks.asStateFlow()
 
+    private val _mountedSources = MutableStateFlow(loadMountedSources())
+    val mountedSources: StateFlow<List<MountedStorageSource>> = _mountedSources.asStateFlow()
+
     private fun loadSettings(): AppSettings {
         val raw = prefs.getString(KEY_SETTINGS, null) ?: return AppSettings()
         return runCatching { json.decodeFromString<AppSettings>(raw) }.getOrDefault(AppSettings())
@@ -62,6 +66,11 @@ class AppSettingsRepository(context: Context) {
     private fun loadBookmarks(): List<VideoBookmark> {
         val raw = prefs.getString(KEY_BOOKMARKS, null) ?: return emptyList()
         return runCatching { json.decodeFromString<List<VideoBookmark>>(raw) }.getOrDefault(emptyList())
+    }
+
+    private fun loadMountedSources(): List<MountedStorageSource> {
+        val raw = prefs.getString(KEY_MOUNTED_SOURCES, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<MountedStorageSource>>(raw) }.getOrDefault(emptyList())
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -140,11 +149,34 @@ class AppSettingsRepository(context: Context) {
         return _bookmarks.value.filter { it.videoUri == videoUri }.sortedBy { it.positionMs }
     }
 
+    fun saveMountedSource(source: MountedStorageSource) {
+        val current = _mountedSources.value.toMutableList()
+        val existingIdx = current.indexOfFirst { it.id == source.id }
+        if (existingIdx >= 0) {
+            current[existingIdx] = source
+        } else {
+            current.add(0, source)
+        }
+        _mountedSources.value = current
+        prefs.edit().putString(KEY_MOUNTED_SOURCES, json.encodeToString(current)).apply()
+    }
+
+    fun removeMountedSource(sourceId: String) {
+        val updated = _mountedSources.value.filterNot { it.id == sourceId }
+        _mountedSources.value = updated
+        prefs.edit().putString(KEY_MOUNTED_SOURCES, json.encodeToString(updated)).apply()
+    }
+
+    fun getMountedSource(sourceId: String): MountedStorageSource? {
+        return _mountedSources.value.firstOrNull { it.id == sourceId }
+    }
+
     companion object {
         private const val KEY_SETTINGS = "app_settings_v1"
         private const val KEY_HISTORY = "playback_history_v1"
         private const val KEY_FAVORITES = "favorite_folders_v1"
         private const val KEY_SAF_ROOTS = "saf_roots_v1"
         private const val KEY_BOOKMARKS = "video_bookmarks_v1"
+        private const val KEY_MOUNTED_SOURCES = "mounted_storage_sources_v1"
     }
 }

@@ -14,17 +14,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.runtime.saveable.rememberSaveable
-import com.padvideo.ui.screens.NetworkBrowserScreen
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
@@ -60,6 +56,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.padvideo.AppContainer
+import com.padvideo.data.model.MountedStorageSource
+import com.padvideo.ui.dialogs.AddStorageMountSheet
 import com.padvideo.ui.screens.FileBrowserScreen
 import com.padvideo.ui.screens.HistoryStreamScreen
 import com.padvideo.ui.screens.MediaLibraryScreen
@@ -79,7 +77,7 @@ fun PadVideoApp(
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val screenWidthDp = configuration.screenWidthDp
-    val useNavigationRail = screenWidthDp >= 600
+    val useNavigationRail = screenWidthDp >= 640
     val isExpandedTabletWidth = screenWidthDp >= 840
 
     val settings by mainViewModel.settings.collectAsState()
@@ -91,15 +89,25 @@ fun PadVideoApp(
     val isScanning by mainViewModel.isScanningLibrary.collectAsState()
     val inspectorVideo by mainViewModel.selectedInspectorVideo.collectAsState()
 
+    val explorerBackend by mainViewModel.explorerBackend.collectAsState()
     val currentDir by mainViewModel.currentDir.collectAsState()
     val activeSafUri by mainViewModel.activeSafTreeUri.collectAsState()
+    val activeMountId by mainViewModel.activeMountId.collectAsState()
     val fileEntries by mainViewModel.fileEntries.collectAsState()
     val breadcrumbs by mainViewModel.breadcrumbs.collectAsState()
     val fileSearch by mainViewModel.fileSearchQuery.collectAsState()
+    val isExplorerLoading by mainViewModel.isExplorerLoading.collectAsState()
+    val explorerError by mainViewModel.explorerError.collectAsState()
     val favorites by mainViewModel.favorites.collectAsState()
     val safRoots by mainViewModel.safRoots.collectAsState()
+    val mountedSources by mainViewModel.mountedSources.collectAsState()
+    val discoveredLanHosts by mainViewModel.discoveredLanHosts.collectAsState()
+    val isScanningLan by mainViewModel.isScanningLan.collectAsState()
     val history by mainViewModel.history.collectAsState()
     val activeLaunch by mainViewModel.activeLaunch.collectAsState()
+
+    var showAddMountSheet by remember { mutableStateOf(false) }
+    var editingMountSource by remember { mutableStateOf<MountedStorageSource?>(null) }
 
     val requiredMediaPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_VIDEO
@@ -159,14 +167,9 @@ fun PadVideoApp(
         }
     }
 
-    var showNetworkFiles by rememberSaveable { mutableStateOf(false) }
-    val networkBrowser by mainViewModel.networkBrowser.collectAsState()
-
-    // Back navigation inside File Browser hierarchy
+    // Back navigation inside unified File Browser hierarchy (Local / SAF / SMB / WebDAV / Quark)
     BackHandler(enabled = activeLaunch == null && selectedTab == MainNavTab.FILES) {
-        if (showNetworkFiles) {
-            if (!mainViewModel.navigateUpSmb()) showNetworkFiles = false
-        } else if (!mainViewModel.navigateUpInExplorer()) {
+        if (!mainViewModel.navigateUpInExplorer()) {
             mainViewModel.selectTab(MainNavTab.LIBRARY)
         }
     }
@@ -195,6 +198,7 @@ fun PadVideoApp(
                 color = MaterialTheme.colorScheme.background
             ) {
                 Scaffold(
+                    contentWindowInsets = WindowInsets.safeDrawing,
                     bottomBar = {
                         if (!useNavigationRail) {
                             NavigationBar {
@@ -209,7 +213,7 @@ fun PadVideoApp(
                                                 contentDescription = tab.label
                                             )
                                         },
-                                        label = { Text(tab.label) }
+                                        label = { Text(tab.label, maxLines = 1) }
                                     )
                                 }
                             }
@@ -220,7 +224,6 @@ fun PadVideoApp(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
-                            .systemBarsPadding()
                     ) {
                         if (useNavigationRail) {
                             NavigationRail(
@@ -309,78 +312,76 @@ fun PadVideoApp(
                                 }
 
                                 MainNavTab.FILES -> {
-                                    Column(Modifier.fillMaxSize()) {
-                                        TabRow(selectedTabIndex = if (showNetworkFiles) 1 else 0, modifier = Modifier.fillMaxWidth()) {
-                                            Tab(selected = !showNetworkFiles, onClick = { showNetworkFiles = false }, text = { Text("本地") })
-                                            Tab(selected = showNetworkFiles, onClick = { showNetworkFiles = true }, text = { Text("网络") })
+                                    val currentPathKey = activeSafUri ?: currentDir.absolutePath
+                                    val isFav = favorites.any { it.path == currentPathKey }
+                                    FileBrowserScreen(
+                                        explorerBackend = explorerBackend,
+                                        currentDir = currentDir,
+                                        activeSafUri = activeSafUri,
+                                        activeMountId = activeMountId,
+                                        entries = fileEntries,
+                                        breadcrumbs = breadcrumbs,
+                                        quickAccessDirs = mainViewModel.getQuickAccessDirs(),
+                                        favorites = favorites,
+                                        safRoots = safRoots,
+                                        mountedSources = mountedSources,
+                                        isCurrentFavorite = isFav,
+                                        hasAllFilesAccess = hasAllFilesAccess,
+                                        isLoading = isExplorerLoading,
+                                        errorMessage = explorerError,
+                                        searchQuery = fileSearch,
+                                        onSearchQueryChange = { mainViewModel.setFileSearchQuery(it) },
+                                        onOpenDirectory = { mainViewModel.openDirectory(it) },
+                                        onOpenEntry = { mainViewModel.openFileEntry(it) },
+                                        onOpenBreadcrumb = { mainViewModel.openBreadcrumb(it) },
+                                        onNavigateUp = { mainViewModel.navigateUpInExplorer() },
+                                        onToggleFavorite = { mainViewModel.toggleCurrentDirectoryFavorite() },
+                                        onOpenSafBookmark = { mainViewModel.openSafRootBookmark(context, it) },
+                                        onRemoveSafBookmark = { mainViewModel.removeSafRoot(it) },
+                                        onOpenMountedSource = { mainViewModel.openMountedSource(it) },
+                                        onEditMountedSource = { mount ->
+                                            editingMountSource = mount
+                                            showAddMountSheet = true
+                                        },
+                                        onOpenFavorite = { fav ->
+                                            if (fav.isSafUri) {
+                                                mainViewModel.openSafRootBookmark(
+                                                    context,
+                                                    com.padvideo.data.model.SafRootBookmark(fav.name, fav.path)
+                                                )
+                                            } else {
+                                                mainViewModel.openDirectory(File(fav.path))
+                                            }
+                                        },
+                                        onOpenAddMountSheet = {
+                                            editingMountSource = null
+                                            showAddMountSheet = true
+                                        },
+                                        onPickVideoDocument = { singleVideoLauncher.launch(arrayOf("video/*")) },
+                                        onRequestAllFilesAccess = {
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                                runCatching {
+                                                    val intent = Intent(
+                                                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                                        Uri.parse("package:${context.packageName}")
+                                                    )
+                                                    context.startActivity(intent)
+                                                }.onFailure {
+                                                    val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                                    runCatching { context.startActivity(fallback) }
+                                                }
+                                                hasAllFilesAccess = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
+                                            } else {
+                                                mediaPermissionLauncher.launch(requiredMediaPermission)
+                                            }
+                                        },
+                                        onRefresh = {
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                                hasAllFilesAccess = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
+                                            }
+                                            mainViewModel.refreshFileExplorer(context)
                                         }
-                                        if (showNetworkFiles) {
-                                            NetworkBrowserScreen(
-                                                state = networkBrowser,
-                                                onConnect = mainViewModel::connectSmb,
-                                                onOpenEntry = mainViewModel::openSmbEntry,
-                                                onRefresh = mainViewModel::refreshSmb,
-                                                onUp = { mainViewModel.navigateUpSmb() },
-                                                onDirectPlay = { mainViewModel.playNetworkStream(it) }
-                                            )
-                                        } else {
-                                            val currentPathKey = activeSafUri ?: currentDir.absolutePath
-                                            val isFav = favorites.any { it.path == currentPathKey }
-                                            FileBrowserScreen(
-                                                currentDir = currentDir,
-                                                activeSafUri = activeSafUri,
-                                                entries = fileEntries,
-                                                breadcrumbs = breadcrumbs,
-                                                quickAccessDirs = mainViewModel.getQuickAccessDirs(),
-                                                favorites = favorites,
-                                                safRoots = safRoots,
-                                                isCurrentFavorite = isFav,
-                                                hasAllFilesAccess = hasAllFilesAccess,
-                                                searchQuery = fileSearch,
-                                                onSearchQueryChange = { mainViewModel.setFileSearchQuery(it) },
-                                                onOpenDirectory = { mainViewModel.openDirectory(it) },
-                                                onNavigateUp = { mainViewModel.navigateUpInExplorer() },
-                                                onToggleFavorite = { mainViewModel.toggleCurrentDirectoryFavorite() },
-                                                onOpenSafBookmark = { mainViewModel.openSafRootBookmark(context, it) },
-                                                onOpenFavorite = { fav ->
-                                                    if (fav.isSafUri) {
-                                                        mainViewModel.openSafRootBookmark(
-                                                            context,
-                                                            com.padvideo.data.model.SafRootBookmark(fav.name, fav.path)
-                                                        )
-                                                    } else {
-                                                        mainViewModel.openDirectory(File(fav.path))
-                                                    }
-                                                },
-                                                onRequestMountSafFolder = { safTreeLauncher.launch(null) },
-                                                onPickVideoDocument = { singleVideoLauncher.launch(arrayOf("video/*")) },
-                                                onRequestAllFilesAccess = {
-                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                                        runCatching {
-                                                            val intent = Intent(
-                                                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                                                Uri.parse("package:${context.packageName}")
-                                                            )
-                                                            context.startActivity(intent)
-                                                        }.onFailure {
-                                                            val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                                                            runCatching { context.startActivity(fallback) }
-                                                        }
-                                                        hasAllFilesAccess = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
-                                                    } else {
-                                                        mediaPermissionLauncher.launch(requiredMediaPermission)
-                                                    }
-                                                },
-                                                onRefresh = {
-                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                                        hasAllFilesAccess = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
-                                                    }
-                                                    mainViewModel.refreshFileExplorer(context)
-                                                },
-                                                onPlayVideo = { mainViewModel.playVideo(it) }
-                                            )
-                                        }
-                                    }
+                                    )
                                 }
 
                                 MainNavTab.HISTORY_STREAM -> {
@@ -406,6 +407,22 @@ fun PadVideoApp(
                             }
                         }
                     }
+                }
+
+                if (showAddMountSheet) {
+                    AddStorageMountSheet(
+                        editingSource = editingMountSource,
+                        discoveredLanHosts = discoveredLanHosts,
+                        isScanningLan = isScanningLan,
+                        onScanLanHosts = { mainViewModel.scanLanSmbHosts() },
+                        onSaveMount = { source -> mainViewModel.saveAndOpenMount(source) },
+                        onDeleteMount = { id -> mainViewModel.removeMountedSource(id) },
+                        onPickSafDirectory = { safTreeLauncher.launch(null) },
+                        onDismiss = {
+                            showAddMountSheet = false
+                            editingMountSource = null
+                        }
+                    )
                 }
             }
         }

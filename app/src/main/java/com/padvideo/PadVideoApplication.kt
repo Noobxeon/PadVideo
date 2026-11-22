@@ -5,15 +5,21 @@ import android.content.Context
 import com.padvideo.data.preferences.AppSettingsRepository
 import com.padvideo.data.repository.FileExplorerRepository
 import com.padvideo.data.repository.OnlineSubtitleRepository
+import com.padvideo.data.repository.QuarkDriveRepository
 import com.padvideo.data.repository.RealtimeTranslationRepository
 import com.padvideo.data.repository.SmbRepository
+import com.padvideo.data.repository.WebDavRepository
 import java.io.File
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     val settingsRepository = AppSettingsRepository(appContext)
-    internal val smbRepository = SmbRepository()
+    internal val smbRepository = SmbRepository().apply {
+        registerSavedMounts(settingsRepository.mountedSources.value)
+    }
+    val webDavRepository = WebDavRepository()
+    val quarkDriveRepository = QuarkDriveRepository()
     val fileExplorerRepository = FileExplorerRepository(appContext)
     val translationRepository = RealtimeTranslationRepository(
         cacheDirectory = File(appContext.cacheDir, "translations")

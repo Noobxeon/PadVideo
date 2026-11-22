@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -65,6 +66,7 @@ fun SettingsScreen(
     var openSubKey by remember(settings.openSubtitlesApiKey) { mutableStateOf(settings.openSubtitlesApiKey) }
     var subDlKey by remember(settings.subDlApiKey) { mutableStateOf(settings.subDlApiKey) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
+    val isCompact = LocalConfiguration.current.screenWidthDp < 600
 
     LazyColumn(
         modifier = modifier
@@ -239,7 +241,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (isCompact) {
                     OutlinedTextField(
                         value = openAiApiKey,
                         onValueChange = { openAiApiKey = it },
@@ -247,16 +249,37 @@ fun SettingsScreen(
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = openAiModel,
                         onValueChange = { openAiModel = it },
                         label = { Text("模型名 (如 deepseek-chat)") },
                         singleLine = true,
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(0.8f)
+                        modifier = Modifier.fillMaxWidth()
                     )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(
+                            value = openAiApiKey,
+                            onValueChange = { openAiApiKey = it },
+                            label = { Text("API Key") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = openAiModel,
+                            onValueChange = { openAiModel = it },
+                            label = { Text("模型名 (如 deepseek-chat)") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(0.8f)
+                        )
+                    }
                 }
             }
         }
@@ -282,23 +305,43 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (isCompact) {
                     OutlinedTextField(
                         value = openSubKey,
                         onValueChange = { openSubKey = it },
                         label = { Text("OpenSubtitles REST v1 Api-Key (可选)") },
                         singleLine = true,
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = subDlKey,
                         onValueChange = { subDlKey = it },
                         label = { Text("SubDL API Key (可选)") },
                         singleLine = true,
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(
+                            value = openSubKey,
+                            onValueChange = { openSubKey = it },
+                            label = { Text("OpenSubtitles REST v1 Api-Key (可选)") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = subDlKey,
+                            onValueChange = { subDlKey = it },
+                            label = { Text("SubDL API Key (可选)") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))

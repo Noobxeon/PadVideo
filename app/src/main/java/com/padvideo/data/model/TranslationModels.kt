@@ -5,8 +5,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class TranslationEngineType(val label: String, val description: String) {
     AUTO_CLOUD(
-        label = "智能云端双引擎 (推荐)",
-        description = "自动调度 Google GTX 与 MyMemory 翻译引擎，免 Key 即开即用、国内海外自动容灾"
+        label = "智能云端多引擎 (推荐·国内直连)",
+        description = "自动调度微软必应神经翻译、Google、有道与 MyMemory，免 Key 免代理、国内海外自动容灾"
+    ),
+    BING_NEURAL(
+        label = "微软必应神经翻译 (国内直连)",
+        description = "微软必应神经大模型翻译，国内网络免代理极速批量响应"
     ),
     GOOGLE_GTX(
         label = "Google 神经机器翻译",
@@ -14,7 +18,7 @@ enum class TranslationEngineType(val label: String, val description: String) {
     ),
     MYMEMORY(
         label = "MyMemory 全球开放翻译",
-        description = "无需代理与密钥，全球直连翻译记忆库"
+        description = "全球开放翻译记忆库，适合作为轻量备用通道"
     ),
     MLKIT_OFFLINE(
         label = "ML Kit 端侧离线翻译",

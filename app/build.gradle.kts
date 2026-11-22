@@ -1,3 +1,11 @@
+import com.android.build.api.instrumentation.AsmClassVisitorFactory
+import com.android.build.api.instrumentation.ClassContext
+import com.android.build.api.instrumentation.ClassData
+import com.android.build.api.instrumentation.InstrumentationParameters
+import com.android.build.api.instrumentation.InstrumentationScope
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.commons.ClassRemapper
+import org.objectweb.asm.commons.SimpleRemapper
 import java.util.Properties
 
 plugins {
@@ -5,6 +13,30 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+}
+
+// The RPC library throws java.rmi.UnmarshalException on malformed messages; Android does not ship java.rmi.
+abstract class SmbRpcAndroidCompatibility : AsmClassVisitorFactory<InstrumentationParameters.None> {
+    override fun isInstrumentable(classData: ClassData): Boolean =
+        classData.className.startsWith("com.rapid7.client.dcerpc.")
+
+    override fun createClassVisitor(classContext: ClassContext, nextClassVisitor: ClassVisitor): ClassVisitor =
+        ClassRemapper(
+            nextClassVisitor,
+            SimpleRemapper(
+                "java/rmi/UnmarshalException",
+                "com/padvideo/data/repository/SmbRpcDecodingException"
+            )
+        )
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.instrumentation.transformClassesWith(
+            SmbRpcAndroidCompatibility::class.java,
+            InstrumentationScope.ALL
+        ) {}
+    }
 }
 
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -28,8 +60,8 @@ android {
         applicationId = "com.padvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 5
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -87,6 +119,7 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -123,17 +156,20 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
 
-    // Networking & Serialization (Online Subtitle Search + Cloud/AI Translation)
+    // Networking, SMB 2/3, Windows Share Enumeration, WebDAV & Cloud Drive Support
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.hierynomus:smbj:0.14.0")
+    implementation("com.rapid7.client:dcerpc:0.12.13") {
+        exclude(group = "com.google.guava", module = "guava")
+    }
+    implementation("com.google.guava:guava:33.4.0-android")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
-    // Google ML Kit On-Device Neural Translation (Offline Real-Time Translation)
+    // Google ML Kit On-Device Neural Translation & Language ID
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
-
 
     // Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")
