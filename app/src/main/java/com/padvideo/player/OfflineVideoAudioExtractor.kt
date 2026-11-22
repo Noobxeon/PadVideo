@@ -142,12 +142,19 @@ internal class OfflineVideoAudioExtractor(
                     val allBytes = packetBuf.toByteArray()
                     packetBuf.reset()
                     if (allBytes.isEmpty()) return
-                    val validSize = size.coerceIn(0, allBytes.size)
-                    val startOffset = (allBytes.size - offset - validSize).coerceAtLeast(0)
-                    val packetBytes = if (startOffset == 0 && validSize == allBytes.size) {
+                    val safeOffset = offset.coerceIn(0, allBytes.size)
+                    val endIdx = (allBytes.size - safeOffset).coerceAtLeast(0)
+                    val startOffset = (endIdx - size).coerceAtLeast(0)
+                    if (safeOffset > 0) {
+                        // Retain lookahead bytes belonging to the next sample (used by TS/ADTS/MP3 extractors)
+                        packetBuf.write(allBytes, endIdx, safeOffset)
+                    }
+                    val packetBytes = if (startOffset == 0 && endIdx == allBytes.size) {
                         allBytes
+                    } else if (endIdx > startOffset) {
+                        allBytes.copyOfRange(startOffset, endIdx)
                     } else {
-                        allBytes.copyOfRange(startOffset, (startOffset + validSize).coerceAtMost(allBytes.size))
+                        ByteArray(0)
                     }
                     if (packetBytes.isNotEmpty()) {
                         pendingPackets.addLast(AudioPacket(packetBytes, timeUs.coerceAtLeast(0L)))
@@ -182,6 +189,7 @@ internal class OfflineVideoAudioExtractor(
             var mediaCodecHelper: MediaCodecAudioDecoderHelper? = null
             var decoderName = "PCM"
             var decoderInitialized = false
+            var consecutiveDecodeErrors = 0
             val resampler = StreamingMono16kResampler()
             var totalSamples16k = 0L
             var lastProgressEmitMs = 0L
@@ -236,17 +244,55 @@ internal class OfflineVideoAudioExtractor(
                         when {
                             ffmpegBridge != null -> {
                                 val pcmChunks = mutableListOf<DecodedPcmChunk>()
-                                ffmpegBridge.decodePacket(pkt.bytes, pkt.bytes.size, pkt.timeUs) { arr, len, sr, ch, flt, _ ->
-                                    pcmChunks.add(DecodedPcmChunk(arr, len, sr, ch, flt))
+                                val decodeAttempt = runCatching {
+                                    ffmpegBridge!!.decodePacket(pkt.bytes, pkt.bytes.size, pkt.timeUs) { arr, len, sr, ch, flt, _ ->
+                                        pcmChunks.add(DecodedPcmChunk(arr, len, sr, ch, flt))
+                                    }
                                 }
-                                for (c in pcmChunks) {
-                                    emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
+                                if (decodeAttempt.isSuccess) {
+                                    consecutiveDecodeErrors = 0
+                                    for (c in pcmChunks) {
+                                        emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
+                                    }
+                                } else {
+                                    // If FFmpeg fails (e.g. quirky AAC/MP4 profile), seamlessly fall back to Android MediaCodec!
+                                    val ffErr = decodeAttempt.exceptionOrNull()
+                                    if (ffErr is CancellationException) throw ffErr
+                                    runCatching { ffmpegBridge?.close() }
+                                    ffmpegBridge = null
+                                    val fallbackCodec = runCatching { MediaCodecAudioDecoderHelper.createOrThrow(fmt) }.getOrNull()
+                                    if (fallbackCodec != null) {
+                                        mediaCodecHelper = fallbackCodec
+                                        decoderName = "MediaCodec(${fmt.sampleMimeType.orEmpty()})"
+                                        val fbChunks = fallbackCodec.decodePacket(pkt.bytes, pkt.timeUs)
+                                        for (c in fbChunks) {
+                                            emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
+                                        }
+                                    } else {
+                                        throw IOException(
+                                            "音频软解失败 (${fmt.sampleMimeType}): ${ffErr?.message ?: "不支持的音轨格式"}",
+                                            ffErr
+                                        )
+                                    }
                                 }
                             }
                             mediaCodecHelper != null -> {
-                                val pcmChunks = mediaCodecHelper.decodePacket(pkt.bytes, pkt.timeUs)
-                                for (c in pcmChunks) {
-                                    emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
+                                val mcAttempt = runCatching { mediaCodecHelper!!.decodePacket(pkt.bytes, pkt.timeUs) }
+                                if (mcAttempt.isSuccess) {
+                                    consecutiveDecodeErrors = 0
+                                    for (c in mcAttempt.getOrThrow()) {
+                                        emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
+                                    }
+                                } else {
+                                    val mcErr = mcAttempt.exceptionOrNull()
+                                    if (mcErr is CancellationException) throw mcErr
+                                    consecutiveDecodeErrors++
+                                    if (totalSamples16k == 0L || consecutiveDecodeErrors > 25) {
+                                        throw IOException(
+                                            "MediaCodec 音频解码失败 (${fmt.sampleMimeType}): ${mcErr?.message ?: "请检查音轨"}",
+                                            mcErr
+                                        )
+                                    }
                                 }
                             }
                             fmt.sampleMimeType == MimeTypes.AUDIO_RAW -> {
@@ -286,17 +332,19 @@ internal class OfflineVideoAudioExtractor(
                     }
                 }
 
-                // Flush trailing decoded audio frames
+                // Flush trailing decoded audio frames (ignore benign EOF codec errors if audio already decoded)
                 if (ffmpegBridge != null) {
                     val tailChunks = mutableListOf<DecodedPcmChunk>()
-                    ffmpegBridge.finishAndDrain { arr, len, sr, ch, flt, _ ->
-                        tailChunks.add(DecodedPcmChunk(arr, len, sr, ch, flt))
+                    runCatching {
+                        ffmpegBridge!!.finishAndDrain { arr, len, sr, ch, flt, _ ->
+                            tailChunks.add(DecodedPcmChunk(arr, len, sr, ch, flt))
+                        }
                     }
                     for (c in tailChunks) {
                         emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
                     }
                 } else if (mediaCodecHelper != null) {
-                    val tailChunks = mediaCodecHelper.finishAndDrain()
+                    val tailChunks = runCatching { mediaCodecHelper!!.finishAndDrain() }.getOrDefault(emptyList())
                     for (c in tailChunks) {
                         emitResampled(c.bytes, c.length, c.sampleRate, c.channels, c.isFloat)
                     }
@@ -325,11 +373,12 @@ internal class OfflineVideoAudioExtractor(
     private fun buildDataSource(uriString: String, httpHeaders: Map<String, String>): DataSource {
         return when {
             uriString.startsWith("smb://", ignoreCase = true) -> {
-                SmbDataSource(smbRepository)
+                // 512 KB read-ahead buffer drastically cuts SMB2 round-trips on multi-GB MP4/MKV files
+                BufferedReadAheadDataSource(SmbDataSource(smbRepository), bufferSizeBytes = 512 * 1024)
             }
             uriString.startsWith("http://", ignoreCase = true) ||
                 uriString.startsWith("https://", ignoreCase = true) -> {
-                DefaultHttpDataSource.Factory()
+                val httpDs = DefaultHttpDataSource.Factory()
                     .setAllowCrossProtocolRedirects(true)
                     .setConnectTimeoutMs(15_000)
                     .setReadTimeoutMs(30_000)
@@ -339,10 +388,67 @@ internal class OfflineVideoAudioExtractor(
                         }
                     }
                     .createDataSource()
+                BufferedReadAheadDataSource(httpDs, bufferSizeBytes = 256 * 1024)
             }
             else -> {
-                DefaultDataSource.Factory(context).createDataSource()
+                BufferedReadAheadDataSource(DefaultDataSource.Factory(context).createDataSource(), bufferSizeBytes = 256 * 1024)
             }
+        }
+    }
+
+    /**
+     * Read-ahead buffered [DataSource] wrapper that collapses hundreds of thousands of tiny
+     * demuxer packet reads (e.g. 300-byte AAC frames) into large sequential LAN/disk transfers.
+     */
+    internal class BufferedReadAheadDataSource(
+        private val upstream: DataSource,
+        bufferSizeBytes: Int = 512 * 1024
+    ) : DataSource {
+        private val buffer = ByteArray(bufferSizeBytes.coerceAtLeast(8 * 1024))
+        private var bufPos = 0
+        private var bufLimit = 0
+
+        override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
+            upstream.addTransferListener(transferListener)
+        }
+
+        override fun open(dataSpec: DataSpec): Long {
+            bufPos = 0
+            bufLimit = 0
+            return upstream.open(dataSpec)
+        }
+
+        override fun read(target: ByteArray, offset: Int, length: Int): Int {
+            if (length == 0) return 0
+            val available = bufLimit - bufPos
+            if (available > 0) {
+                val toCopy = minOf(available, length)
+                System.arraycopy(buffer, bufPos, target, offset, toCopy)
+                bufPos += toCopy
+                return toCopy
+            }
+            // Large reads bypass buffer directly to avoid extra copy
+            if (length >= buffer.size) {
+                return upstream.read(target, offset, length)
+            }
+            val filled = upstream.read(buffer, 0, buffer.size)
+            if (filled == C.RESULT_END_OF_INPUT) {
+                return C.RESULT_END_OF_INPUT
+            }
+            bufPos = 0
+            bufLimit = filled
+            val toCopy = minOf(filled, length)
+            System.arraycopy(buffer, 0, target, offset, toCopy)
+            bufPos = toCopy
+            return toCopy
+        }
+
+        override fun getUri(): Uri? = upstream.uri
+
+        override fun close() {
+            bufPos = 0
+            bufLimit = 0
+            upstream.close()
         }
     }
 

@@ -34,10 +34,12 @@ class FfmpegAudioDecoderBridge private constructor(
         onPcmOutput: (pcmBytes: ByteArray, byteCount: Int, sampleRate: Int, channels: Int, isFloat: Boolean, ptsUs: Long) -> Unit
     ) {
         if (length <= 0) return
-        val inputBuffer = dequeueInputWithRetry() ?: return
+        val inputBuffer = dequeueInputWithRetry(onPcmOutput) ?: return
         inputBuffer.clear()
         inputBuffer.ensureSpaceForWrite(length)
         inputBuffer.data?.put(packetBytes, 0, length)
+        // CRITICAL: FfmpegAudioDecoder.decode() reads inputBuffer.data.limit() as packet length!
+        inputBuffer.flip()
         inputBuffer.timeUs = timeUs
         decoder.queueInputBuffer(inputBuffer)
         drainOutputs(onPcmOutput, waitForEos = false)
@@ -46,9 +48,10 @@ class FfmpegAudioDecoderBridge private constructor(
     fun finishAndDrain(
         onPcmOutput: (pcmBytes: ByteArray, byteCount: Int, sampleRate: Int, channels: Int, isFloat: Boolean, ptsUs: Long) -> Unit
     ) {
-        val eosBuffer = dequeueInputWithRetry()
+        val eosBuffer = dequeueInputWithRetry(onPcmOutput)
         if (eosBuffer != null) {
             eosBuffer.clear()
+            eosBuffer.flip()
             eosBuffer.addFlag(C.BUFFER_FLAG_END_OF_STREAM)
             decoder.queueInputBuffer(eosBuffer)
             drainOutputs(onPcmOutput, waitForEos = true)
@@ -57,16 +60,15 @@ class FfmpegAudioDecoderBridge private constructor(
         }
     }
 
-    private fun dequeueInputWithRetry(): DecoderInputBuffer? {
-        repeat(60) {
+    private fun dequeueInputWithRetry(
+        onPcmOutput: (pcmBytes: ByteArray, byteCount: Int, sampleRate: Int, channels: Int, isFloat: Boolean, ptsUs: Long) -> Unit
+    ): DecoderInputBuffer? {
+        repeat(120) {
+            // Always drain pending outputs first so we never drop decoded PCM or stall the decoder thread
+            drainOutputs(onPcmOutput, waitForEos = false)
             val buf = decoder.dequeueInputBuffer()
             if (buf != null) return buf
-            // Drain any pending output so decoder thread frees input slots
-            val out = decoder.dequeueOutputBuffer()
-            out?.release()
-            if (out == null) {
-                Thread.sleep(1L)
-            }
+            Thread.sleep(1L)
         }
         return null
     }
@@ -79,7 +81,7 @@ class FfmpegAudioDecoderBridge private constructor(
         while (true) {
             val outBuf: SimpleDecoderOutputBuffer? = decoder.dequeueOutputBuffer()
             if (outBuf == null) {
-                if (!waitForEos || idleRounds >= 80) break
+                if (!waitForEos || idleRounds >= 100) break
                 idleRounds++
                 Thread.sleep(2L)
                 continue
@@ -87,6 +89,7 @@ class FfmpegAudioDecoderBridge private constructor(
             idleRounds = 0
             try {
                 if (outBuf.isEndOfStream) break
+                if (outBuf.shouldBeSkipped) continue
                 val byteBuf = outBuf.data
                 if (byteBuf != null && byteBuf.remaining() > 0) {
                     val dup = byteBuf.duplicate().order(ByteOrder.LITTLE_ENDIAN)

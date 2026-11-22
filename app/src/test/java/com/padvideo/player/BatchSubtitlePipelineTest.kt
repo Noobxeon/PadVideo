@@ -221,4 +221,44 @@ class BatchSubtitlePipelineTest {
             server.shutdown()
         }
     }
+
+    @Test
+    fun `buffered read-ahead data source collapses tiny demuxer reads and preserves exact byte fidelity`() {
+        val payload = ByteArray(100_000) { i -> ((i * 31 + 7) and 0xFF).toByte() }
+        var upstreamReadCalls = 0
+        val fakeUpstream = object : androidx.media3.datasource.BaseDataSource(false) {
+            private var pos = 0
+            private var uri: android.net.Uri? = null
+            override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
+                uri = dataSpec.uri
+                pos = dataSpec.position.toInt()
+                return (payload.size - pos).toLong()
+            }
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                upstreamReadCalls++
+                if (pos >= payload.size) return androidx.media3.common.C.RESULT_END_OF_INPUT
+                val n = minOf(length, payload.size - pos)
+                System.arraycopy(payload, pos, buffer, offset, n)
+                pos += n
+                return n
+            }
+            override fun getUri(): android.net.Uri? = uri
+            override fun close() = Unit
+        }
+
+        val buffered = OfflineVideoAudioExtractor.BufferedReadAheadDataSource(fakeUpstream, bufferSizeBytes = 32 * 1024)
+        buffered.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("smb://192.168.1.10/Movies/test.mp4")))
+        val reconstructed = java.io.ByteArrayOutputStream(payload.size)
+        val tinyBuf = ByteArray(350) // Simulating 350-byte AAC packet reads
+        while (true) {
+            val n = buffered.read(tinyBuf, 0, tinyBuf.size)
+            if (n == androidx.media3.common.C.RESULT_END_OF_INPUT) break
+            reconstructed.write(tinyBuf, 0, n)
+        }
+        buffered.close()
+
+        assertTrue("Expected exact byte match", payload.contentEquals(reconstructed.toByteArray()))
+        // 100 KB / 32 KB = 4 upstream reads instead of 286 tiny RPCs!
+        assertTrue("Expected <= 6 upstream SMB reads, got $upstreamReadCalls", upstreamReadCalls <= 6)
+    }
 }
