@@ -3,6 +3,7 @@ package com.padvideo.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -57,7 +58,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -109,16 +109,18 @@ fun FileBrowserScreen(
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val screenWidthDp = LocalConfiguration.current.screenWidthDp
-    val isCompact = screenWidthDp < 720
     val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
     val activeMount = mountedSources.firstOrNull { it.id == activeMountId }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = if (isCompact) 14.dp else 20.dp, vertical = 12.dp)
-    ) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        // Measure actual available width (after NavigationRail) so portrait tablets never squeeze the title!
+        val isCompact = maxWidth < 860.dp
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = if (isCompact) 14.dp else 20.dp, vertical = 12.dp)
+        ) {
         // Responsive Header (clean 2-row on portrait, 1-row on landscape tablet)
         if (isCompact) {
             Row(
@@ -449,6 +451,7 @@ fun FileBrowserScreen(
                 }
             }
         }
+    }
     }
 }
 

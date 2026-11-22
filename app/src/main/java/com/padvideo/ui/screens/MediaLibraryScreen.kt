@@ -2,6 +2,7 @@ package com.padvideo.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -53,7 +54,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -93,14 +93,16 @@ fun MediaLibraryScreen(
     modifier: Modifier = Modifier
 ) {
     var showSortMenu by remember { mutableStateOf(false) }
-    val screenWidthDp = LocalConfiguration.current.screenWidthDp
-    val isCompact = screenWidthDp < 720
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = if (isCompact) 14.dp else 20.dp, vertical = 12.dp)
-    ) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val isCompact = maxWidth < 860.dp
+        val isNarrowGrid = maxWidth < 600.dp
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = if (isCompact) 14.dp else 20.dp, vertical = 12.dp)
+        ) {
         // Responsive Header: 2 clean rows on portrait / compact, 1 row on landscape tablet
         if (isCompact) {
             Row(
@@ -319,7 +321,7 @@ fun MediaLibraryScreen(
                 Box(modifier = Modifier.weight(if (isExpandedTabletWidth && selectedInspectorVideo != null) 0.68f else 1f)) {
                     if (settings.viewLayoutMode == ViewLayoutMode.GRID) {
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = if (screenWidthDp < 600) 156.dp else 240.dp),
+                            columns = GridCells.Adaptive(minSize = if (isNarrowGrid) 156.dp else 240.dp),
                             contentPadding = PaddingValues(bottom = 24.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -364,6 +366,7 @@ fun MediaLibraryScreen(
                 }
             }
         }
+    }
     }
 }
 

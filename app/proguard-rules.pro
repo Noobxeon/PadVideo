@@ -26,21 +26,20 @@
 -keep class com.google.android.gms.** { *; }
 -dontwarn com.google.android.gms.**
 
-# SMBJ, NTLM, BouncyCastle crypto & DCERPC Windows Share Enumeration
+# SMBJ, MBassador Event Bus, NTLM, BouncyCastle crypto & DCERPC Windows Share Enumeration
 -dontwarn org.ietf.jgss.**
 -dontwarn javax.el.**
 -dontwarn java.rmi.**
 -dontwarn com.hierynomus.**
 -dontwarn com.rapid7.**
 -dontwarn net.engio.mbassy.**
--keep class com.hierynomus.smbj.** { *; }
--keep class com.hierynomus.security.** { *; }
--keep class com.hierynomus.ntlm.** { *; }
--keep class com.hierynomus.spnego.** { *; }
--keep class com.rapid7.client.dcerpc.** { *; }
+-dontwarn org.slf4j.**
+-keep class com.hierynomus.** { *; }
+-keep class net.engio.mbassy.** { *; }
+-keep class com.rapid7.** { *; }
+-keep class org.bouncycastle.** { *; }
+-keep class org.slf4j.** { *; }
 -keep class com.padvideo.data.repository.SmbRpcDecodingException { *; }
--keep class org.bouncycastle.jce.provider.** { *; }
--keep class org.bouncycastle.crypto.** { *; }
--keepclassmembers class com.hierynomus.smbj.** {
+-keepclassmembers class com.hierynomus.** {
     @net.engio.mbassy.listener.Handler <methods>;
 }
