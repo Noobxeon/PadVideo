@@ -250,9 +250,10 @@ class PlayerViewModel(
             playerController.loadVideo(video.uriString, video.title, resumeMs, headers)
         }
 
-        // Auto-load saved external subtitle, sidecar subtitle (local/SAF/SMB/WebDAV/Quark), or inline demo subtitle
+        // Auto-load saved external subtitle, sidecar subtitle (local/SAF/SMB/WebDAV/Quark), generated local index, or inline demo subtitle
         val preferredSubPath = savedHistory?.externalSubtitlePath?.takeIf { File(it).exists() }
             ?: video.sidecarSubtitlePaths.firstOrNull()
+            ?: container.generatedSubtitleStore.findIndexedSubtitle(video.uriString)?.absolutePath
 
         if (preferredSubPath != null) {
             loadSidecarSubtitlePath(preferredSubPath, video)
@@ -276,8 +277,10 @@ class PlayerViewModel(
             postMessage("已自动恢复上次播放进度 ${formatDurationMs(resumeMs)}")
         }
 
-        // Automatically resume direct video-audio AI speech recognition if user kept it enabled
-        if (settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+        // Automatically resume direct video-audio AI speech recognition ONLY when no sidecar/generated subtitle exists
+        if (preferredSubPath == null &&
+            settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL
+        ) {
             startVideoAudioAsr(settings.value.translationConfig)
         }
     }

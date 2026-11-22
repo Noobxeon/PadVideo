@@ -66,6 +66,14 @@ class PadVideoTabletUiTest {
         composeRule.onNodeWithText("Interstellar.2014.1080p.mp4").assertIsDisplayed()
         composeRule.onNodeWithText("外挂字幕×1").assertIsDisplayed()
 
+        // Open Directory Batch Subtitle Sheet (Silero VAD + SMB/Local write-back)
+        composeRule.onNodeWithText("批量生成字幕").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("目录批量生成字幕（自动写回目录）").assertIsDisplayed()
+        composeRule.onNodeWithText("Silero VAD 神经网络精准断句（推荐）").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("关闭批量字幕面板").performClick()
+        composeRule.waitForIdle()
+
         // Open unified Add Mount sheet in the same tab
         composeRule.onNodeWithText("添加挂载").performClick()
         composeRule.waitForIdle()

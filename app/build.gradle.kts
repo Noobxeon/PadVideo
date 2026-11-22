@@ -60,8 +60,8 @@ android {
         applicationId = "com.padvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -149,8 +149,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
-    // AndroidX Media3 Commercial Video Playback Engine (ExoPlayer, HLS, DASH, RTSP, Session)
-    val media3Version = "1.4.1"
+    // AndroidX Media3 Commercial Video Playback Engine (ExoPlayer, HLS, DASH, RTSP, Session + FFmpeg Audio Soft-Decoder)
+    val media3Version = "1.5.0"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
@@ -158,6 +158,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3Version")
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
 
     // Networking, SMB 2/3, Windows Share Enumeration, WebDAV & Cloud Drive Support
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

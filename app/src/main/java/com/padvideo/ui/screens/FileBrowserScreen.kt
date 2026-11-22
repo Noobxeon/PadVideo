@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Clear
@@ -61,6 +62,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.padvideo.data.model.BatchSubtitleTaskProgress
 import com.padvideo.data.model.BreadcrumbSegment
 import com.padvideo.data.model.FavoriteFolder
 import com.padvideo.data.model.FileEntry
@@ -107,6 +109,11 @@ fun FileBrowserScreen(
     onPickVideoDocument: () -> Unit,
     onRequestAllFilesAccess: () -> Unit,
     onRefresh: () -> Unit,
+    batchProgress: BatchSubtitleTaskProgress = BatchSubtitleTaskProgress(),
+    onOpenBatchSubtitleForDirectory: () -> Unit = {},
+    onOpenBatchSubtitleForVideo: (FileEntry) -> Unit = {},
+    onCancelBatchSubtitle: () -> Unit = {},
+    onDismissBatchSubtitleSummary: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
@@ -365,8 +372,113 @@ fun FileBrowserScreen(
                     }
                 }
 
+                if (isCompact) {
+                    IconButton(onClick = onOpenBatchSubtitleForDirectory) {
+                        Icon(
+                            imageVector = Icons.Outlined.AutoAwesome,
+                            contentDescription = "批量生成字幕",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                } else {
+                    AssistChip(
+                        onClick = onOpenBatchSubtitleForDirectory,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Outlined.AutoAwesome,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text("批量生成字幕") }
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+
                 IconButton(onClick = onRefresh) {
                     Icon(Icons.Outlined.Refresh, contentDescription = "刷新目录")
+                }
+            }
+        }
+
+        // Live Batch Subtitle Generation Banner (pinned cleanly below breadcrumb bar)
+        if (batchProgress.isRunning || batchProgress.summaryMessage != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onOpenBatchSubtitleForDirectory() }
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (batchProgress.isRunning) {
+                                    "正在为「${batchProgress.directoryTitle}」生成字幕 (${batchProgress.processedVideos}/${batchProgress.totalVideos.coerceAtLeast(1)})"
+                                } else {
+                                    batchProgress.summaryMessage.orEmpty()
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (batchProgress.isRunning) {
+                                Text(
+                                    text = buildString {
+                                        if (batchProgress.currentVideoName.isNotBlank()) {
+                                            append(batchProgress.currentVideoName)
+                                            append(" · ")
+                                        }
+                                        append(batchProgress.currentStageText)
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        if (batchProgress.isRunning) {
+                            TextButton(onClick = onCancelBatchSubtitle) {
+                                Text("停止")
+                            }
+                        } else {
+                            TextButton(onClick = onOpenBatchSubtitleForDirectory) {
+                                Text("详情")
+                            }
+                            TextButton(onClick = onDismissBatchSubtitleSummary) {
+                                Text("关闭")
+                            }
+                        }
+                    }
+                    if (batchProgress.isRunning) {
+                        LinearProgressIndicator(
+                            progress = { batchProgress.overallFraction.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                        )
+                    }
                 }
             }
         }
@@ -446,7 +558,8 @@ fun FileBrowserScreen(
                     FileEntryRow(
                         entry = entry,
                         formattedDate = if (entry.lastModifiedMs > 0L) dateFormat.format(Date(entry.lastModifiedMs)) else "",
-                        onClick = { onOpenEntry(entry) }
+                        onClick = { onOpenEntry(entry) },
+                        onGenerateSubtitle = { onOpenBatchSubtitleForVideo(entry) }
                     )
                 }
             }
@@ -459,7 +572,8 @@ fun FileBrowserScreen(
 private fun FileEntryRow(
     entry: FileEntry,
     formattedDate: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onGenerateSubtitle: () -> Unit
 ) {
     Surface(
         modifier = Modifier
@@ -544,6 +658,19 @@ private fun FileEntryRow(
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (entry.isVideoFile) {
+                IconButton(onClick = onGenerateSubtitle) {
+                    Icon(
+                        imageVector = Icons.Outlined.AutoAwesome,
+                        contentDescription = "为此视频生成字幕",
+                        tint = if (entry.sidecarSubtitles.isEmpty()) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                        },
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

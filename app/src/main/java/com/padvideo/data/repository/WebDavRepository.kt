@@ -227,6 +227,25 @@ class WebDavRepository(
         return runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
     }
 
+    suspend fun uploadFileBytes(
+        source: MountedStorageSource,
+        targetFileUrl: String,
+        bytes: ByteArray,
+        contentType: String = "application/x-subrip; charset=utf-8"
+    ) = withContext(Dispatchers.IO) {
+        val headers = buildAuthHeaders(source)
+        val reqBuilder = Request.Builder()
+            .url(targetFileUrl)
+            .header("User-Agent", USER_AGENT)
+            .put(bytes.toRequestBody(contentType.toMediaType()))
+        headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+        httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IOException("WebDAV 写入字幕失败 (HTTP ${resp.code})")
+            }
+        }
+    }
+
     companion object {
         private const val USER_AGENT = "PadVideo/1.2 WebDAVClient"
 

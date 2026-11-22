@@ -21,10 +21,12 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
-    <!-- Media Playback & WakeLock -->
+    <!-- Media Playback, Background Batch Subtitle Generation & WakeLock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Tablet & Large-Screen Hardware Feature Declarations (all optional so every device can install) -->
     <uses-feature
@@ -94,6 +96,11 @@
                 <data android:mimeType="application/dash+xml" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".player.BatchSubtitleService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

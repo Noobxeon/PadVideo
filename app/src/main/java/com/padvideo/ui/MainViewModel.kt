@@ -8,6 +8,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.padvideo.AppContainer
 import com.padvideo.data.model.AppSettings
+import com.padvideo.data.model.AsrEngineType
+import com.padvideo.data.model.BatchSubtitleJobConfig
+import com.padvideo.data.model.BatchSubtitleTarget
+import com.padvideo.data.model.BatchSubtitleTaskProgress
 import com.padvideo.data.model.BreadcrumbSegment
 import com.padvideo.data.model.FavoriteFolder
 import com.padvideo.data.model.FileEntry
@@ -21,6 +25,7 @@ import com.padvideo.data.model.VideoItem
 import com.padvideo.data.model.ViewLayoutMode
 import com.padvideo.data.repository.SmbLocation
 import com.padvideo.data.repository.SmbRepository
+import com.padvideo.player.AsrModelDownloadProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +68,10 @@ class MainViewModel(
     val favorites: StateFlow<List<FavoriteFolder>> = container.settingsRepository.favorites
     val safRoots: StateFlow<List<SafRootBookmark>> = container.settingsRepository.safRoots
     val mountedSources: StateFlow<List<MountedStorageSource>> = container.settingsRepository.mountedSources
+    val batchSubtitleProgress: StateFlow<BatchSubtitleTaskProgress> = container.batchSubtitleGenerator.progress
+    val asrDownloadProgress: StateFlow<AsrModelDownloadProgress?> = container.videoSpeechRecognizer.downloadProgress
+    private val _readyAsrEngines = MutableStateFlow(computeReadyAsrEngines())
+    val readyAsrEngines: StateFlow<Set<AsrEngineType>> = _readyAsrEngines.asStateFlow()
 
     private val _selectedTab = MutableStateFlow(MainNavTab.LIBRARY)
     val selectedTab: StateFlow<MainNavTab> = _selectedTab.asStateFlow()
@@ -516,13 +525,15 @@ class MainViewModel(
                 _isExplorerLoading.value = false
                 _explorerError.value = null
                 _breadcrumbs.value = container.fileExplorerRepository.buildBreadcrumbs(dir)
-                _fileEntries.value = container.fileExplorerRepository.listDirectory(
-                    directory = dir,
-                    showHidden = s.showHiddenFiles,
-                    searchQuery = _fileSearchQuery.value,
-                    sortField = s.sortField,
-                    sortAscending = s.sortAscending,
-                    historyByUri = historyMap
+                _fileEntries.value = enrichWithIndexedSubtitles(
+                    container.fileExplorerRepository.listDirectory(
+                        directory = dir,
+                        showHidden = s.showHiddenFiles,
+                        searchQuery = _fileSearchQuery.value,
+                        sortField = s.sortField,
+                        sortAscending = s.sortAscending,
+                        historyByUri = historyMap
+                    )
                 )
             }
             ExplorerBackend.SAF -> {
@@ -572,7 +583,7 @@ class MainViewModel(
                     historyByUri = historyMap
                 )
             }.onSuccess { entries ->
-                _fileEntries.value = entries
+                _fileEntries.value = enrichWithIndexedSubtitles(entries)
             }.onFailure { err ->
                 if (err is CancellationException) throw err
                 _explorerError.value = "读取挂载目录失败：${err.message ?: "请重新授权目录"}"
@@ -620,7 +631,7 @@ class MainViewModel(
                         }
                     )
                 }
-                _fileEntries.value = mapped
+                _fileEntries.value = enrichWithIndexedSubtitles(mapped)
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
@@ -660,7 +671,9 @@ class MainViewModel(
                 BreadcrumbSegment(label = label, path = url, stackIndex = idx)
             }
             try {
-                _fileEntries.value = container.webDavRepository.listDirectory(mount, currentUrl, query)
+                _fileEntries.value = enrichWithIndexedSubtitles(
+                    container.webDavRepository.listDirectory(mount, currentUrl, query)
+                )
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
@@ -685,7 +698,9 @@ class MainViewModel(
                 BreadcrumbSegment(label = label, path = fid, stackIndex = idx)
             }
             try {
-                _fileEntries.value = container.quarkDriveRepository.listFolder(mount, currentFid, query)
+                _fileEntries.value = enrichWithIndexedSubtitles(
+                    container.quarkDriveRepository.listFolder(mount, currentFid, query)
+                )
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
@@ -813,6 +828,263 @@ class MainViewModel(
 
     fun removeHistoryItem(uriString: String) {
         container.settingsRepository.removeHistoryItem(uriString)
+    }
+
+    // --- Directory Batch Subtitle Generation (SMB / Local / SAF / WebDAV / Quark) ---
+
+    private fun computeReadyAsrEngines(): Set<AsrEngineType> =
+        AsrEngineType.entries.filter { container.videoSpeechRecognizer.isModelReady(it) }.toSet()
+
+    fun refreshReadyAsrEngines() {
+        _readyAsrEngines.value = computeReadyAsrEngines()
+    }
+
+    fun downloadAsrModelInBrowser(engine: AsrEngineType) {
+        viewModelScope.launch {
+            container.videoSpeechRecognizer.downloadOfflineModel(engine)
+            refreshReadyAsrEngines()
+        }
+    }
+
+    fun getCurrentDirectoryTitle(): String {
+        return _breadcrumbs.value.lastOrNull()?.label?.takeIf { it.isNotBlank() }
+            ?: _currentDir.value.name.ifBlank { "当前目录" }
+    }
+
+    fun startBatchSubtitleForSingleVideo(entry: FileEntry, config: BatchSubtitleJobConfig) {
+        val video = entry.videoItem ?: return
+        val safTreeUri = _activeSafTreeUri.value
+        val safParentDirUri = safDirStack.lastOrNull()?.uri?.toString()
+        val target = BatchSubtitleTarget(
+            video = video,
+            safParentTreeUri = safTreeUri,
+            safParentDirUri = safParentDirUri
+        )
+        container.batchSubtitleGenerator.startBatch(
+            directoryTitle = video.title,
+            targetsProvider = { listOf(target) },
+            config = config.copy(skipExistingSubtitles = false),
+            onVideoSubtitleWritten = {
+                viewModelScope.launch {
+                    refreshReadyAsrEngines()
+                    refreshFileExplorer()
+                }
+            }
+        )
+    }
+
+    fun startBatchSubtitlesForCurrentDirectory(config: BatchSubtitleJobConfig) {
+        val backend = _explorerBackend.value
+        val title = getCurrentDirectoryTitle()
+        val currentEntriesSnapshot = _fileEntries.value
+        val localDirSnapshot = _currentDir.value
+        val safTreeSnapshot = _activeSafTreeUri.value
+        val safDirSnapshot = safDirStack.lastOrNull()
+        val smbMountSnapshot = activeSmbMount
+        val smbLocSnapshot = currentSmbLocation
+        val webDavMountSnapshot = activeWebDavMount
+        val webDavUrlSnapshot = webDavStack.lastOrNull()?.second
+        val quarkMountSnapshot = activeQuarkMount
+        val quarkFidSnapshot = quarkStack.lastOrNull()?.second ?: "0"
+
+        val targetsProvider: suspend () -> List<BatchSubtitleTarget> = {
+            if (!config.includeSubfolders) {
+                currentEntriesSnapshot.mapNotNull { entry ->
+                    entry.videoItem?.let { vid ->
+                        BatchSubtitleTarget(
+                            video = vid,
+                            safParentTreeUri = safTreeSnapshot,
+                            safParentDirUri = safDirSnapshot?.uri?.toString()
+                        )
+                    }
+                }
+            } else {
+                when (backend) {
+                    ExplorerBackend.SMB -> {
+                        val mount = smbMountSnapshot
+                        val loc = smbLocSnapshot
+                        if (mount == null || loc == null) {
+                            emptyList()
+                        } else {
+                            collectSmbVideosRecursively(mount, loc, maxDepth = 5)
+                        }
+                    }
+                    ExplorerBackend.LOCAL -> collectLocalVideosRecursively(localDirSnapshot, maxDepth = 5)
+                    ExplorerBackend.SAF -> {
+                        if (safDirSnapshot == null) emptyList()
+                        else collectSafVideosRecursively(safDirSnapshot, safTreeSnapshot, maxDepth = 5)
+                    }
+                    ExplorerBackend.WEBDAV -> {
+                        val mount = webDavMountSnapshot
+                        val url = webDavUrlSnapshot
+                        if (mount == null || url == null) emptyList()
+                        else collectWebDavVideosRecursively(mount, url, maxDepth = 4)
+                    }
+                    ExplorerBackend.QUARK -> {
+                        val mount = quarkMountSnapshot
+                        if (mount == null) emptyList()
+                        else collectQuarkVideosRecursively(mount, quarkFidSnapshot, maxDepth = 4)
+                    }
+                }
+            }
+        }
+
+        container.batchSubtitleGenerator.startBatch(
+            directoryTitle = title,
+            targetsProvider = targetsProvider,
+            config = config,
+            onVideoSubtitleWritten = {
+                viewModelScope.launch {
+                    refreshReadyAsrEngines()
+                    refreshFileExplorer()
+                }
+            }
+        )
+    }
+
+    fun cancelBatchSubtitle() {
+        container.batchSubtitleGenerator.cancel()
+    }
+
+    fun dismissBatchSubtitleSummary() {
+        container.batchSubtitleGenerator.dismissSummary()
+    }
+
+    private fun enrichWithIndexedSubtitles(entries: List<FileEntry>): List<FileEntry> {
+        return entries.map { entry ->
+            if (!entry.isVideoFile || entry.sidecarSubtitles.isNotEmpty()) {
+                entry
+            } else {
+                val indexed = container.generatedSubtitleStore.findIndexedSubtitle(entry.uriString)
+                if (indexed != null) {
+                    val pathList = listOf(indexed.absolutePath)
+                    entry.copy(
+                        sidecarSubtitles = pathList,
+                        videoItem = entry.videoItem?.copy(sidecarSubtitlePaths = pathList)
+                    )
+                } else {
+                    entry
+                }
+            }
+        }
+    }
+
+    private suspend fun collectSmbVideosRecursively(
+        mount: MountedStorageSource,
+        location: SmbLocation,
+        maxDepth: Int
+    ): List<BatchSubtitleTarget> {
+        val creds = SmbRepository.Credentials(mount.username, mount.password, mount.domain)
+        val out = mutableListOf<BatchSubtitleTarget>()
+        suspend fun walk(loc: SmbLocation, depth: Int) {
+            val list = runCatching { container.smbRepository.list(loc, creds) }.getOrDefault(emptyList())
+            for (item in list) {
+                if (item.isFolder) {
+                    if (depth < maxDepth) walk(item.location, depth + 1)
+                } else if (!item.isSubtitle) {
+                    out.add(BatchSubtitleTarget(video = item.asVideo().copy(mountSourceId = mount.id)))
+                }
+            }
+        }
+        walk(location, 0)
+        return out
+    }
+
+    private fun collectLocalVideosRecursively(dir: File, maxDepth: Int): List<BatchSubtitleTarget> {
+        val s = settings.value
+        val out = mutableListOf<BatchSubtitleTarget>()
+        fun walk(folder: File, depth: Int) {
+            val entries = container.fileExplorerRepository.listDirectory(
+                directory = folder,
+                showHidden = s.showHiddenFiles,
+                sortField = s.sortField,
+                sortAscending = s.sortAscending
+            )
+            for (entry in entries) {
+                if (entry.isDirectory) {
+                    if (depth < maxDepth) walk(File(entry.path), depth + 1)
+                } else if (entry.videoItem != null) {
+                    out.add(BatchSubtitleTarget(video = entry.videoItem))
+                }
+            }
+        }
+        walk(dir, 0)
+        return out
+    }
+
+    private suspend fun collectSafVideosRecursively(
+        docDir: DocumentFile,
+        treeUri: String?,
+        maxDepth: Int
+    ): List<BatchSubtitleTarget> {
+        val s = settings.value
+        val out = mutableListOf<BatchSubtitleTarget>()
+        suspend fun walk(doc: DocumentFile, depth: Int) {
+            val entries = container.fileExplorerRepository.listSafDirectory(
+                treeOrDirDoc = doc,
+                showHidden = s.showHiddenFiles,
+                sortField = s.sortField,
+                sortAscending = s.sortAscending
+            )
+            val childDocs = doc.listFiles().associateBy { it.uri.toString() }
+            for (entry in entries) {
+                if (entry.isDirectory) {
+                    if (depth < maxDepth) {
+                        childDocs[entry.uriString]?.let { walk(it, depth + 1) }
+                    }
+                } else if (entry.videoItem != null) {
+                    out.add(
+                        BatchSubtitleTarget(
+                            video = entry.videoItem,
+                            safParentTreeUri = treeUri,
+                            safParentDirUri = doc.uri.toString()
+                        )
+                    )
+                }
+            }
+        }
+        walk(docDir, 0)
+        return out
+    }
+
+    private suspend fun collectWebDavVideosRecursively(
+        mount: MountedStorageSource,
+        rootUrl: String,
+        maxDepth: Int
+    ): List<BatchSubtitleTarget> {
+        val out = mutableListOf<BatchSubtitleTarget>()
+        suspend fun walk(url: String, depth: Int) {
+            val entries = runCatching { container.webDavRepository.listDirectory(mount, url) }.getOrDefault(emptyList())
+            for (entry in entries) {
+                if (entry.isDirectory) {
+                    if (depth < maxDepth) walk(entry.uriString, depth + 1)
+                } else if (entry.videoItem != null) {
+                    out.add(BatchSubtitleTarget(video = entry.videoItem))
+                }
+            }
+        }
+        walk(rootUrl, 0)
+        return out
+    }
+
+    private suspend fun collectQuarkVideosRecursively(
+        mount: MountedStorageSource,
+        rootFid: String,
+        maxDepth: Int
+    ): List<BatchSubtitleTarget> {
+        val out = mutableListOf<BatchSubtitleTarget>()
+        suspend fun walk(fid: String, depth: Int) {
+            val entries = runCatching { container.quarkDriveRepository.listFolder(mount, fid) }.getOrDefault(emptyList())
+            for (entry in entries) {
+                if (entry.isDirectory) {
+                    if (depth < maxDepth) walk(entry.path, depth + 1)
+                } else if (entry.videoItem != null) {
+                    out.add(BatchSubtitleTarget(video = entry.videoItem))
+                }
+            }
+        }
+        walk(rootFid, 0)
+        return out
     }
 
     companion object {

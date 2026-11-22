@@ -3,6 +3,7 @@ package com.padvideo.data.repository
 import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2CreateOptions
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
@@ -160,6 +161,14 @@ internal class SmbRepository {
                                     subtitleNames.filter { sub ->
                                         val stem = sub.substringBeforeLast('.').lowercase()
                                         stem == base || stem.startsWith("$base.") || stem.startsWith("${base}_")
+                                    }.sortedBy { sub ->
+                                        val lower = sub.lowercase()
+                                        when {
+                                            ".bilingual." in lower -> 0
+                                            ".zh." in lower || ".chs." in lower -> 1
+                                            ".asr." in lower -> 2
+                                            else -> 3
+                                        }
                                     }.map { location.child(it).uri }
                                 } else {
                                     emptyList()
@@ -270,6 +279,35 @@ internal class SmbRepository {
                     offset += count
                 }
                 out.toByteArray()
+            }
+        }
+
+    /**
+     * Writes a small file (such as an auto-generated .srt subtitle) directly into the target SMB share directory.
+     */
+    suspend fun writeSmallFileBytes(location: SmbLocation, bytes: ByteArray): Unit =
+        withContext(Dispatchers.IO) {
+            val shareName = location.share ?: throw IOException("无效的 SMB 共享路径")
+            val auth = resolveCredentials(location, null)
+                ?: throw IOException("未找到 SMB 认证信息，请重新连接共享")
+            withSession(location, auth) { session ->
+                val share = (session.connectShare(shareName) as? DiskShare)
+                    ?: throw IOException("目标 SMB 共享不是磁盘共享")
+                share.use { diskShare ->
+                    diskShare.openFile(
+                        location.path,
+                        setOf(AccessMask.GENERIC_WRITE),
+                        setOf(FileAttributes.FILE_ATTRIBUTE_NORMAL),
+                        SMB2ShareAccess.ALL,
+                        SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                        setOf(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE)
+                    ).use { smbFile ->
+                        smbFile.outputStream.use { out ->
+                            out.write(bytes)
+                            out.flush()
+                        }
+                    }
+                }
             }
         }
 

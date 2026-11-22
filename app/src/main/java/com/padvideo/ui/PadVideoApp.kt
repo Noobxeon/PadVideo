@@ -56,8 +56,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.padvideo.AppContainer
+import com.padvideo.data.model.FileEntry
 import com.padvideo.data.model.MountedStorageSource
 import com.padvideo.ui.dialogs.AddStorageMountSheet
+import com.padvideo.ui.dialogs.BatchSubtitleSheet
 import com.padvideo.ui.screens.FileBrowserScreen
 import com.padvideo.ui.screens.HistoryStreamScreen
 import com.padvideo.ui.screens.MediaLibraryScreen
@@ -105,9 +107,14 @@ fun PadVideoApp(
     val isScanningLan by mainViewModel.isScanningLan.collectAsState()
     val history by mainViewModel.history.collectAsState()
     val activeLaunch by mainViewModel.activeLaunch.collectAsState()
+    val batchSubtitleProgress by mainViewModel.batchSubtitleProgress.collectAsState()
+    val asrDownloadProgress by mainViewModel.asrDownloadProgress.collectAsState()
+    val readyAsrEngines by mainViewModel.readyAsrEngines.collectAsState()
 
     var showAddMountSheet by remember { mutableStateOf(false) }
     var editingMountSource by remember { mutableStateOf<MountedStorageSource?>(null) }
+    var showBatchSubtitleSheet by remember { mutableStateOf(false) }
+    var batchSingleTargetEntry by remember { mutableStateOf<FileEntry?>(null) }
 
     val requiredMediaPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_VIDEO
@@ -146,8 +153,15 @@ fun PadVideoApp(
     ) { treeUri: Uri? ->
         if (treeUri != null) {
             runCatching {
-                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 context.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
+            }.onFailure {
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
             }
             mainViewModel.registerSafTree(context, treeUri)
         }
@@ -380,7 +394,20 @@ fun PadVideoApp(
                                                 hasAllFilesAccess = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
                                             }
                                             mainViewModel.refreshFileExplorer(context)
-                                        }
+                                        },
+                                        batchProgress = batchSubtitleProgress,
+                                        onOpenBatchSubtitleForDirectory = {
+                                            mainViewModel.refreshReadyAsrEngines()
+                                            batchSingleTargetEntry = null
+                                            showBatchSubtitleSheet = true
+                                        },
+                                        onOpenBatchSubtitleForVideo = { entry ->
+                                            mainViewModel.refreshReadyAsrEngines()
+                                            batchSingleTargetEntry = entry
+                                            showBatchSubtitleSheet = true
+                                        },
+                                        onCancelBatchSubtitle = { mainViewModel.cancelBatchSubtitle() },
+                                        onDismissBatchSubtitleSummary = { mainViewModel.dismissBatchSubtitleSummary() }
                                     )
                                 }
 
@@ -421,6 +448,34 @@ fun PadVideoApp(
                         onDismiss = {
                             showAddMountSheet = false
                             editingMountSource = null
+                        }
+                    )
+                }
+
+                if (showBatchSubtitleSheet) {
+                    val videoEntries = fileEntries.filter { it.isVideoFile }
+                    val missingSubCount = videoEntries.count { it.sidecarSubtitles.isEmpty() }
+                    BatchSubtitleSheet(
+                        directoryTitle = mainViewModel.getCurrentDirectoryTitle(),
+                        singleTargetEntry = batchSingleTargetEntry,
+                        currentDirTotalVideos = videoEntries.size,
+                        currentDirMissingSubVideos = missingSubCount,
+                        initialTranslationConfig = settings.translationConfig,
+                        readyAsrEngines = readyAsrEngines,
+                        asrDownloadProgress = asrDownloadProgress,
+                        taskProgress = batchSubtitleProgress,
+                        onDownloadAsrModel = { eng -> mainViewModel.downloadAsrModelInBrowser(eng) },
+                        onStartDirectoryBatch = { cfg ->
+                            mainViewModel.startBatchSubtitlesForCurrentDirectory(cfg)
+                        },
+                        onStartSingleVideo = { entry, cfg ->
+                            mainViewModel.startBatchSubtitleForSingleVideo(entry, cfg)
+                        },
+                        onCancelBatch = { mainViewModel.cancelBatchSubtitle() },
+                        onDismissSummary = { mainViewModel.dismissBatchSubtitleSummary() },
+                        onDismiss = {
+                            showBatchSubtitleSheet = false
+                            batchSingleTargetEntry = null
                         }
                     )
                 }
