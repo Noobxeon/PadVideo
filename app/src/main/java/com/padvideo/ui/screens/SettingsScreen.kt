@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.padvideo.data.model.AppSettings
+import com.padvideo.data.model.AsrEngineType
 import com.padvideo.data.model.ThemeMode
 import com.padvideo.data.model.TranslationEngineType
 import com.padvideo.data.model.TranslationLanguage
@@ -60,6 +61,15 @@ fun SettingsScreen(
     }
     var openAiModel by remember(settings.translationConfig.openAiModel) {
         mutableStateOf(settings.translationConfig.openAiModel)
+    }
+    var cloudAsrBaseUrl by remember(settings.translationConfig.cloudAsrBaseUrl) {
+        mutableStateOf(settings.translationConfig.cloudAsrBaseUrl)
+    }
+    var cloudAsrApiKey by remember(settings.translationConfig.cloudAsrApiKey) {
+        mutableStateOf(settings.translationConfig.cloudAsrApiKey)
+    }
+    var cloudAsrModel by remember(settings.translationConfig.cloudAsrModel) {
+        mutableStateOf(settings.translationConfig.cloudAsrModel)
     }
 
     var assrtToken by remember(settings.assrtApiToken) { mutableStateOf(settings.assrtApiToken) }
@@ -281,6 +291,91 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Text(
+                    text = "无字幕视频原声 AI 识别引擎（内置 Sherpa-ONNX 离线或云端 Whisper）",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AsrEngineType.entries.forEach { asrEngine ->
+                        FilterChip(
+                            selected = settings.translationConfig.asrEngine == asrEngine,
+                            onClick = {
+                                onUpdateSettings { s ->
+                                    s.copy(translationConfig = s.translationConfig.copy(asrEngine = asrEngine))
+                                }
+                            },
+                            label = { Text(asrEngine.label) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = settings.translationConfig.asrEngine.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "可选：云端 Whisper 兼容语音识别接口 (硅基流动 SenseVoiceSmall / Groq / 本地 faster-whisper)",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = cloudAsrBaseUrl,
+                    onValueChange = { cloudAsrBaseUrl = it },
+                    label = { Text("ASR API Base URL (如 https://api.siliconflow.cn/v1)") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                if (isCompact) {
+                    OutlinedTextField(
+                        value = cloudAsrApiKey,
+                        onValueChange = { cloudAsrApiKey = it },
+                        label = { Text("ASR API Key (留空则复用上方大模型 Key)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = cloudAsrModel,
+                        onValueChange = { cloudAsrModel = it },
+                        label = { Text("语音模型名 (如 FunAudioLLM/SenseVoiceSmall)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(
+                            value = cloudAsrApiKey,
+                            onValueChange = { cloudAsrApiKey = it },
+                            label = { Text("ASR API Key (留空则复用上方 Key)") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = cloudAsrModel,
+                            onValueChange = { cloudAsrModel = it },
+                            label = { Text("语音模型名 (如 FunAudioLLM/SenseVoiceSmall)") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(0.9f)
+                        )
+                    }
+                }
             }
         }
 
@@ -356,7 +451,10 @@ fun SettingsScreen(
                                     translationConfig = current.translationConfig.copy(
                                         openAiBaseUrl = openAiBaseUrl.trim().ifBlank { "https://api.openai.com/v1" },
                                         openAiApiKey = openAiApiKey.trim(),
-                                        openAiModel = openAiModel.trim().ifBlank { "gpt-4o-mini" }
+                                        openAiModel = openAiModel.trim().ifBlank { "gpt-4o-mini" },
+                                        cloudAsrBaseUrl = cloudAsrBaseUrl.trim().ifBlank { "https://api.siliconflow.cn/v1" },
+                                        cloudAsrApiKey = cloudAsrApiKey.trim(),
+                                        cloudAsrModel = cloudAsrModel.trim().ifBlank { "FunAudioLLM/SenseVoiceSmall" }
                                     )
                                 )
                             }

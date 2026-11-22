@@ -87,6 +87,14 @@ class PadVideoTabletUiTest {
         composeRule.onNodeWithText("在线字幕").assertIsDisplayed()
         composeRule.onNodeWithText("实时翻译 · 双语").assertIsDisplayed()
 
+        // Open Real-Time Translation & Built-In Video Audio AI ASR Sheet
+        composeRule.onNodeWithText("实时翻译 · 双语").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("无字幕视频原声识别引擎（直采音轨 · 戴耳机可用）").assertIsDisplayed()
+        composeRule.onNodeWithText("一键下载离线识别模型并开启（国内镜像）").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("关闭").performClick()
+        composeRule.waitForIdle()
+
         // Open Interactive Bilingual Transcript Side-Drawer
         composeRule.onNodeWithContentDescription("双语台词本分栏").performClick()
         composeRule.waitForIdle()

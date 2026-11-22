@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.padvideo.AppContainer
 import com.padvideo.data.model.AbLoopState
 import com.padvideo.data.model.AppSettings
+import com.padvideo.data.model.AsrEngineType
 import com.padvideo.data.model.AspectRatioMode
 import com.padvideo.data.model.GestureHudState
 import com.padvideo.data.model.GestureHudType
@@ -24,7 +25,8 @@ import com.padvideo.data.model.VideoBookmark
 import com.padvideo.data.model.VideoItem
 import com.padvideo.data.model.formatDurationMs
 import com.padvideo.data.model.formatSignedMs
-import com.padvideo.player.LiveSpeechCaptionEngine
+import com.padvideo.player.AsrModelDownloadProgress
+import com.padvideo.player.CapturedAudioSegment
 import com.padvideo.player.PadPlayerController
 import com.padvideo.subtitle.SubtitleParser
 import com.padvideo.subtitle.VideoFilenameParser
@@ -88,16 +90,14 @@ class PlayerViewModel(
 ) : ViewModel() {
 
     val settings: StateFlow<AppSettings> = container.settingsRepository.settings
+    val asrDownloadProgress: StateFlow<AsrModelDownloadProgress?> = container.videoSpeechRecognizer.downloadProgress
+    private val _readyAsrEngines = MutableStateFlow(computeReadyAsrEngines())
+    val readyAsrEngines: StateFlow<Set<AsrEngineType>> = _readyAsrEngines.asStateFlow()
 
     val playerController = PadPlayerController(
         context = appContext,
         smbRepository = container.smbRepository,
         preferHardwareDecoder = settings.value.hardwareDecoderPreferred
-    )
-
-    private val liveSpeechEngine = LiveSpeechCaptionEngine(
-        context = appContext,
-        onSegmentRecognized = { spokenText -> onLiveSpeechSegment(spokenText) }
     )
 
     private val _uiState = MutableStateFlow(PlayerUiState())
@@ -107,6 +107,11 @@ class PlayerViewModel(
     private var lookaheadTranslationJob: Job? = null
     private var embeddedCueTranslationJob: Job? = null
     private var sleepTimerJob: Job? = null
+    private var asrLiveCaptionJob: Job? = null
+    private var asrDownloadJob: Job? = null
+    private var liveAsrPrimaryText: String = ""
+    private var liveAsrSecondaryText: String = ""
+    private var liveAsrExpiresAtMs: Long = 0L
     private var lastTranslatedWindowStart = -1
     private var lookaheadRetryAtMs = 0L
     private var playbackGeneration = 0
@@ -124,6 +129,7 @@ class PlayerViewModel(
             var tickCounter = 0
             while (isActive) {
                 val pos = playerController.exoPlayer.currentPosition.coerceAtLeast(0L)
+                playerController.updateCachedPlaybackPosition(pos)
                 val dur = playerController.exoPlayer.duration.takeIf { it > 0L }
                     ?: _uiState.value.durationMs
 
@@ -160,30 +166,6 @@ class PlayerViewModel(
         }
 
         viewModelScope.launch {
-            liveSpeechEngine.statusMessage.collect { message ->
-                if (message != null && settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
-                    postMessage(message)
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            liveSpeechEngine.partialTranscript.collect { partial ->
-                if (_uiState.value.subtitlesEnabled &&
-                    settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL &&
-                    partial.isNotBlank()
-                ) {
-                    _uiState.update {
-                        it.copy(
-                            displayPrimaryLine = "🎙️ $partial",
-                            displaySecondaryLine = it.displaySecondaryLine
-                        )
-                    }
-                }
-            }
-        }
-
-        viewModelScope.launch {
             playerController.playbackEndedCount.collect { endedCount ->
                 if (endedCount > 0) {
                     saveCurrentPlaybackHistory()
@@ -198,7 +180,7 @@ class PlayerViewModel(
 
     fun startLaunch(launch: ActivePlaybackLaunch) {
         playbackGeneration++
-        liveSpeechEngine.stop()
+        stopVideoAudioAsr()
         resetTranslationWork()
         val video = launch.video
         val playlist = launch.playlist.ifEmpty { listOf(video) }
@@ -292,6 +274,11 @@ class PlayerViewModel(
 
         if (resumeMs > 0L) {
             postMessage("已自动恢复上次播放进度 ${formatDurationMs(resumeMs)}")
+        }
+
+        // Automatically resume direct video-audio AI speech recognition if user kept it enabled
+        if (settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+            startVideoAudioAsr(settings.value.translationConfig)
         }
     }
 
@@ -397,13 +384,36 @@ class PlayerViewModel(
         }
 
         val cues = state.externalCues
+        val transConfig = settings.value.translationConfig
+
+        // In Live Video-Audio ASR mode, show the latest live recognized/translated caption smoothly while playing
+        if (transConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (liveAsrPrimaryText.isNotBlank() && nowMs <= liveAsrExpiresAtMs) {
+                if (state.displayPrimaryLine != liveAsrPrimaryText || state.displaySecondaryLine != liveAsrSecondaryText) {
+                    _uiState.update {
+                        it.copy(
+                            displayPrimaryLine = liveAsrPrimaryText,
+                            displaySecondaryLine = liveAsrSecondaryText,
+                            activeCueIndex = (cues.lastIndex).coerceAtLeast(-1)
+                        )
+                    }
+                }
+                return
+            } else if (cues.isEmpty()) {
+                if (state.displayPrimaryLine.isNotEmpty() || state.displaySecondaryLine.isNotEmpty()) {
+                    _uiState.update { it.copy(displayPrimaryLine = "", displaySecondaryLine = "") }
+                }
+                return
+            }
+        }
+
         if (cues.isEmpty()) return
 
         val offsetMs = settings.value.subtitleStyle.syncOffsetMs
         val activeCues = SubtitleParser.findActiveCues(cues, positionMs, offsetMs)
         val nearestIdx = SubtitleParser.findCueIndexAtOrAfter(cues, positionMs, offsetMs)
 
-        val transConfig = settings.value.translationConfig
         if (transConfig.displayMode == TranslationDisplayMode.BILINGUAL ||
             transConfig.displayMode == TranslationDisplayMode.TARGET_ONLY
         ) {
@@ -482,34 +492,130 @@ class PlayerViewModel(
         }
     }
 
-    private fun onLiveSpeechSegment(spokenText: String) {
+    private suspend fun processCapturedVideoAudioSegment(segment: CapturedAudioSegment) {
         val state = _uiState.value
         val config = settings.value.translationConfig
         if (state.currentVideo == null || config.displayMode != TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) return
 
         val generation = playbackGeneration
-        val pos = playerController.exoPlayer.currentPosition.coerceAtLeast(0L)
-        val cue = SubtitleCue(
-            index = (state.externalCues.maxOfOrNull { it.index } ?: 0) + 1,
-            startTimeMs = (pos - 2800L).coerceAtLeast(0L),
-            endTimeMs = pos + 2500L,
-            originalText = spokenText
-        )
-        _uiState.update { it.copy(externalCues = (it.externalCues + cue).sortedBy { line -> line.startTimeMs }) }
-        viewModelScope.launch {
-            val result = container.translationRepository.translateSingle(spokenText, config)
-            if (generation != playbackGeneration || config != settings.value.translationConfig) return@launch
-            _uiState.update { current ->
-                current.copy(
-                    externalCues = current.externalCues.map { line ->
-                        if (line === cue) line.copy(
-                            translatedText = result.getOrNull(), runtimeTranslation = true
-                        ) else line
-                    },
-                    translationError = result.exceptionOrNull()?.let { error -> translationError(config, error) }
+        _uiState.update { it.copy(isTranslatingNow = true) }
+
+        val asrResult = container.videoSpeechRecognizer.transcribeSegment(segment.samples16k, config)
+        if (generation != playbackGeneration) return
+
+        val spokenText = asrResult.getOrElse { err ->
+            _uiState.update {
+                it.copy(
+                    isTranslatingNow = false,
+                    translationError = err.message ?: "视频原声识别失败"
                 )
             }
+            return
+        }.trim()
+
+        if (spokenText.isEmpty()) {
+            _uiState.update { it.copy(isTranslatingNow = false) }
+            return
         }
+
+        // Show recognized original speech immediately while translating
+        liveAsrPrimaryText = spokenText
+        liveAsrSecondaryText = ""
+        liveAsrExpiresAtMs = SystemClock.elapsedRealtime() + 5_500L
+        _uiState.update {
+            it.copy(
+                displayPrimaryLine = spokenText,
+                displaySecondaryLine = "",
+                translationError = null
+            )
+        }
+
+        val transResult = container.translationRepository.translateSingle(spokenText, config)
+        if (generation != playbackGeneration) return
+
+        val translated = transResult.getOrNull()?.trim().orEmpty()
+        val (primary, secondary) = formatDisplayLines(spokenText, translated, TranslationDisplayMode.BILINGUAL)
+        liveAsrPrimaryText = primary
+        liveAsrSecondaryText = secondary
+        liveAsrExpiresAtMs = SystemClock.elapsedRealtime() + 6_500L
+
+        val newCue = SubtitleCue(
+            index = (_uiState.value.externalCues.maxOfOrNull { it.index } ?: 0) + 1,
+            startTimeMs = segment.startPositionMs,
+            endTimeMs = segment.endPositionMs.coerceAtLeast(segment.startPositionMs + 1_500L),
+            originalText = spokenText,
+            translatedText = translated.ifBlank { null },
+            runtimeTranslation = true
+        )
+
+        _uiState.update { current ->
+            val updatedCues = (current.externalCues + newCue).sortedBy { it.startTimeMs }
+            current.copy(
+                externalCues = updatedCues,
+                activeCueIndex = updatedCues.lastIndex,
+                displayPrimaryLine = primary,
+                displaySecondaryLine = secondary,
+                isTranslatingNow = false,
+                translationError = transResult.exceptionOrNull()?.let { err -> translationError(config, err) }
+            )
+        }
+    }
+
+    private fun computeReadyAsrEngines(): Set<AsrEngineType> =
+        AsrEngineType.entries.filter { container.videoSpeechRecognizer.isModelReady(it) }.toSet()
+
+    fun isAsrModelReady(engine: AsrEngineType): Boolean =
+        container.videoSpeechRecognizer.isModelReady(engine)
+
+    fun refreshReadyAsrEngines() {
+        _readyAsrEngines.value = computeReadyAsrEngines()
+    }
+
+    fun downloadAsrModel(
+        engine: AsrEngineType,
+        autoEnableLiveSpeech: Boolean = false,
+        onFinished: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        asrDownloadJob?.cancel()
+        asrDownloadJob = viewModelScope.launch {
+            val res = container.videoSpeechRecognizer.downloadOfflineModel(engine)
+            refreshReadyAsrEngines()
+            res.onSuccess {
+                val msg = if (autoEnableLiveSpeech || settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+                    "离线模型已就绪，正在开启视频原声 AI 实时识别 + 翻译"
+                } else {
+                    "离线模型已下载就绪，可随时开启无字幕视频原声识别"
+                }
+                onFinished(true, msg)
+                postMessage(msg)
+                if (autoEnableLiveSpeech) {
+                    updateTranslationConfig { cfg ->
+                        cfg.copy(
+                            asrEngine = engine,
+                            displayMode = TranslationDisplayMode.LIVE_SPEECH_BILINGUAL
+                        )
+                    }
+                    startVideoAudioAsr(settings.value.translationConfig)
+                } else if (settings.value.translationConfig.asrEngine == engine &&
+                    settings.value.translationConfig.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL
+                ) {
+                    startVideoAudioAsr(settings.value.translationConfig)
+                }
+            }.onFailure { err ->
+                val msg = err.message ?: "模型下载失败，请检查网络连接"
+                onFinished(false, msg)
+                postMessage(msg)
+            }
+        }
+    }
+
+    fun deleteAsrModel(engine: AsrEngineType) {
+        if (settings.value.translationConfig.asrEngine == engine) {
+            stopVideoAudioAsr()
+        }
+        container.videoSpeechRecognizer.deleteModel(engine)
+        refreshReadyAsrEngines()
+        postMessage("已清理 ${engine.label} 离线模型缓存")
     }
 
     private fun translationError(config: TranslationConfig, error: Throwable): String =
@@ -784,23 +890,46 @@ class PlayerViewModel(
     fun setTranslationDisplayMode(mode: TranslationDisplayMode) {
         updateTranslationConfig { it.copy(displayMode = mode) }
         if (mode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
-            startLiveSpeech(settings.value.translationConfig)
+            startVideoAudioAsr(settings.value.translationConfig)
         } else {
-            liveSpeechEngine.stop()
+            stopVideoAudioAsr()
             if (mode == TranslationDisplayMode.BILINGUAL || mode == TranslationDisplayMode.TARGET_ONLY) {
                 val hasExternal = _uiState.value.externalCues.isNotEmpty()
                 val hasEmbedded = playerController.embeddedSubtitleTracks.value.isNotEmpty()
                 if (!hasExternal && !hasEmbedded) {
-                    postMessage("当前视频无内嵌/外挂字幕，请点「在线字幕」匹配或切换「麦克风语音同传」")
+                    postMessage("当前视频无字幕，请切换「视频原声 AI 识别 + 翻译」或点击「在线字幕」")
                 }
             }
         }
     }
 
-    private fun startLiveSpeech(config: TranslationConfig) {
-        liveSpeechEngine.start(
-            config.sourceLanguageCode, config.engine == TranslationEngineType.MLKIT_OFFLINE
-        )
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun startVideoAudioAsr(config: TranslationConfig) {
+        stopVideoAudioAsr()
+        if (config.asrEngine != AsrEngineType.CLOUD_WHISPER_API && !isAsrModelReady(config.asrEngine)) {
+            val msg = "请先在翻译面板一键下载「${config.asrEngine.label}」离线模型（国内镜像直连）"
+            _uiState.update { it.copy(translationError = msg) }
+            postMessage(msg)
+            return
+        }
+        _uiState.update { it.copy(subtitlesEnabled = true, translationError = null) }
+        playerController.audioCaptureProcessor.setCapturing(true)
+        postMessage("已开启视频原声 AI 实时识别 + 翻译（直采视频音轨，戴耳机也可用）")
+        asrLiveCaptionJob = viewModelScope.launch {
+            playerController.audioCaptureProcessor.segments.collect { segment ->
+                processCapturedVideoAudioSegment(segment)
+            }
+        }
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun stopVideoAudioAsr() {
+        playerController.audioCaptureProcessor.setCapturing(false)
+        asrLiveCaptionJob?.cancel()
+        asrLiveCaptionJob = null
+        liveAsrPrimaryText = ""
+        liveAsrSecondaryText = ""
+        liveAsrExpiresAtMs = 0L
     }
 
     fun updateTranslationConfig(transform: (TranslationConfig) -> TranslationConfig) {
@@ -819,7 +948,7 @@ class PlayerViewModel(
             if (old.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL &&
                 next.displayMode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL
             ) {
-                startLiveSpeech(next)
+                startVideoAudioAsr(next)
             }
         }
         if (_uiState.value.externalCues.isEmpty()) {
@@ -1225,7 +1354,7 @@ class PlayerViewModel(
 
     fun stopAndSave() {
         saveCurrentPlaybackHistory()
-        liveSpeechEngine.stop()
+        stopVideoAudioAsr()
         playbackGeneration++
         resetTranslationWork()
         _uiState.update { it.copy(currentVideo = null) }
@@ -1235,7 +1364,7 @@ class PlayerViewModel(
 
     override fun onCleared() {
         saveCurrentPlaybackHistory()
-        liveSpeechEngine.stop()
+        stopVideoAudioAsr()
         playerController.release()
         super.onCleared()
     }

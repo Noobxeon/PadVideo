@@ -43,3 +43,7 @@
 -keepclassmembers class com.hierynomus.** {
     @net.engio.mbassy.listener.Handler <methods>;
 }
+
+# Sherpa-ONNX Built-in Offline Neural Speech Recognition JNI Bindings
+-dontwarn com.k2fsa.sherpa.onnx.**
+-keep class com.k2fsa.sherpa.onnx.** { *; }

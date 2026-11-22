@@ -24,6 +24,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -48,6 +50,9 @@ class PadPlayerController internal constructor(
 ) {
 
     val exoPlayer: ExoPlayer
+    val audioCaptureProcessor: VideoAudioCaptureProcessor
+    @Volatile
+    private var cachedPlaybackPositionMs: Long = 0L
     private var mediaSession: MediaSession? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var currentBoostGainMb: Int = 0
@@ -80,7 +85,21 @@ class PadPlayerController internal constructor(
     val playbackEndedCount: StateFlow<Int> = _playbackEndedCount.asStateFlow()
 
     init {
-        val renderersFactory = DefaultRenderersFactory(context).apply {
+        audioCaptureProcessor = VideoAudioCaptureProcessor { cachedPlaybackPositionMs }
+
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(audioCaptureProcessor))
+                    .build()
+            }
+        }.apply {
             setEnableDecoderFallback(true)
             setExtensionRendererMode(
                 if (preferHardwareDecoder) {
@@ -284,6 +303,10 @@ class PadPlayerController internal constructor(
         }
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
+    }
+
+    fun updateCachedPlaybackPosition(positionMs: Long) {
+        cachedPlaybackPositionMs = positionMs.coerceAtLeast(0L)
     }
 
     fun play() {

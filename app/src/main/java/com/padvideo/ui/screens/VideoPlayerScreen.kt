@@ -1,8 +1,6 @@
 package com.padvideo.ui.screens
 
-import android.Manifest
 import android.app.Activity
-import android.content.pm.PackageManager
 import android.view.KeyEvent as AndroidKeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -119,7 +117,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -162,6 +159,8 @@ fun VideoPlayerScreen(
     val view = LocalView.current
     val uiState by playerViewModel.uiState.collectAsState()
     val settings by playerViewModel.settings.collectAsState()
+    val asrDownloadProgress by playerViewModel.asrDownloadProgress.collectAsState()
+    val readyAsrEngines by playerViewModel.readyAsrEngines.collectAsState()
     val isPlaying by playerViewModel.playerController.isPlaying.collectAsState()
     val isBuffering by playerViewModel.playerController.isBuffering.collectAsState()
     val playbackError by playerViewModel.playerController.playbackError.collectAsState()
@@ -193,16 +192,6 @@ fun VideoPlayerScreen(
     ) { uri ->
         if (uri != null) {
             playerViewModel.loadExternalSubtitleUri(uri)
-        }
-    }
-
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            playerViewModel.setTranslationDisplayMode(TranslationDisplayMode.LIVE_SPEECH_BILINGUAL)
-        } else {
-            playerViewModel.postMessage("需要麦克风权限才能开启无字幕视频实时语音识别同传")
         }
     }
 
@@ -1045,6 +1034,7 @@ fun VideoPlayerScreen(
                 onSeekToCue = { cue -> playerViewModel.commitSeek(cue.startTimeMs) },
                 onExportBilingualSrt = { playerViewModel.exportBilingualSrtFile() },
                 onOpenOnlineSearch = { showOnlineSubSheet = true },
+                onOpenLiveSpeechSettings = { showTranslationSheet = true },
                 onClose = { playerViewModel.toggleTranscriptDrawer() }
             )
         }
@@ -1082,7 +1072,14 @@ fun VideoPlayerScreen(
         TranslationControlSheet(
             config = settings.translationConfig,
             hasLoadedSubtitleCues = uiState.externalCues.isNotEmpty(),
+            readyAsrEngines = readyAsrEngines,
+            asrDownloadProgress = asrDownloadProgress,
             onSelectDisplayMode = { playerViewModel.setTranslationDisplayMode(it) },
+            onSelectAsrEngine = { asr -> playerViewModel.updateTranslationConfig { it.copy(asrEngine = asr) } },
+            onDownloadAsrModel = { asr, autoEnable ->
+                playerViewModel.downloadAsrModel(asr, autoEnableLiveSpeech = autoEnable)
+            },
+            onDeleteAsrModel = { asr -> playerViewModel.deleteAsrModel(asr) },
             onSelectEngine = { eng -> playerViewModel.updateTranslationConfig { it.copy(engine = eng) } },
             onSelectTargetLanguage = { lang -> playerViewModel.updateTranslationConfig { it.copy(targetLanguage = lang) } },
             onSelectSourceLanguage = { src -> playerViewModel.updateTranslationConfig { it.copy(sourceLanguageCode = src) } },
@@ -1090,17 +1087,6 @@ fun VideoPlayerScreen(
             onQueryDownloadedOfflineModels = playerViewModel::loadDownloadedOfflineLanguages,
             onDownloadOfflineLanguagePack = playerViewModel::downloadOfflineLanguagePack,
             onDownloadOfflinePack = playerViewModel::downloadMlKitOfflinePack,
-            onRequestMicPermissionAndStartLiveSpeech = {
-                val granted = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                if (granted) {
-                    playerViewModel.setTranslationDisplayMode(TranslationDisplayMode.LIVE_SPEECH_BILINGUAL)
-                } else {
-                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            },
             onExportBilingualSrt = { playerViewModel.exportBilingualSrtFile() },
             onDismiss = { showTranslationSheet = false }
         )
@@ -1259,6 +1245,7 @@ private fun TranscriptSideDrawer(
     onSeekToCue: (SubtitleCue) -> Unit,
     onExportBilingualSrt: () -> Unit,
     onOpenOnlineSearch: () -> Unit,
+    onOpenLiveSpeechSettings: () -> Unit,
     onClose: () -> Unit
 ) {
     val listState = rememberLazyListState()
@@ -1309,8 +1296,13 @@ private fun TranscriptSideDrawer(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Outlined.ClosedCaption, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(42.dp))
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("当前暂未挂载外挂字幕", color = Color.LightGray)
+                        Text("当前暂无字幕台词", color = Color.LightGray)
                         Spacer(modifier = Modifier.height(10.dp))
+                        AssistChip(
+                            onClick = onOpenLiveSpeechSettings,
+                            label = { Text("开启视频原声 AI 识别 + 翻译", color = Color.White) }
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
                         AssistChip(
                             onClick = onOpenOnlineSearch,
                             label = { Text("立即在线搜索字幕", color = Color.White) }

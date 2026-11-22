@@ -15,9 +15,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -27,6 +30,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -40,20 +44,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.padvideo.data.model.AsrEngineType
 import com.padvideo.data.model.TranslationConfig
 import com.padvideo.data.model.TranslationDisplayMode
 import com.padvideo.data.model.TranslationEngineType
 import com.padvideo.data.model.TranslationLanguage
+import com.padvideo.player.AsrModelDownloadProgress
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun TranslationControlSheet(
     config: TranslationConfig,
     hasLoadedSubtitleCues: Boolean,
+    readyAsrEngines: Set<AsrEngineType>,
+    asrDownloadProgress: AsrModelDownloadProgress?,
     onSelectDisplayMode: (TranslationDisplayMode) -> Unit,
+    onSelectAsrEngine: (AsrEngineType) -> Unit,
+    onDownloadAsrModel: (AsrEngineType, Boolean) -> Unit,
+    onDeleteAsrModel: (AsrEngineType) -> Unit,
     onSelectEngine: (TranslationEngineType) -> Unit,
     onSelectTargetLanguage: (TranslationLanguage) -> Unit,
     onSelectSourceLanguage: (String) -> Unit,
@@ -61,7 +73,6 @@ fun TranslationControlSheet(
     onQueryDownloadedOfflineModels: ((Set<String>) -> Unit) -> Unit,
     onDownloadOfflineLanguagePack: (String, (String, Set<String>) -> Unit) -> Unit,
     onDownloadOfflinePack: ((String) -> Unit) -> Unit,
-    onRequestMicPermissionAndStartLiveSpeech: () -> Unit,
     onExportBilingualSrt: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -95,12 +106,12 @@ fun TranslationControlSheet(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "实时双语翻译与语音同传中心",
+                        text = "实时双语翻译与视频原声 AI 同传",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "支持内嵌/外挂字幕前瞻预译，无字幕视频可点「在线字幕」或开启麦克风同传",
+                        text = "无字幕视频直接内置 AI 识别视频音轨并实时翻译，不依赖系统语音服务",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -121,15 +132,174 @@ fun TranslationControlSheet(
                 TranslationDisplayMode.entries.forEach { mode ->
                     FilterChip(
                         selected = config.displayMode == mode,
-                        onClick = {
-                            if (mode == TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
-                                onRequestMicPermissionAndStartLiveSpeech()
-                            } else {
-                                onSelectDisplayMode(mode)
-                            }
-                        },
+                        onClick = { onSelectDisplayMode(mode) },
                         label = { Text(mode.label) }
                     )
+                }
+            }
+
+            // Dedicated Built-In Video-Audio ASR Card (for subtitle-free videos)
+            Spacer(modifier = Modifier.height(12.dp))
+            val selectedAsr = config.asrEngine
+            val isSelectedAsrReady = selectedAsr in readyAsrEngines
+            val isAnyAsrDownloading = asrDownloadProgress?.isDownloading == true
+
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Outlined.GraphicEq,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "无字幕视频原声识别引擎（直采音轨 · 戴耳机可用）",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AsrEngineType.entries.forEach { asrEngine ->
+                            val ready = asrEngine in readyAsrEngines
+                            FilterChip(
+                                selected = selectedAsr == asrEngine,
+                                onClick = { onSelectAsrEngine(asrEngine) },
+                                leadingIcon = if (ready && asrEngine != AsrEngineType.CLOUD_WHISPER_API) {
+                                    {
+                                        Icon(
+                                            imageVector = Icons.Outlined.CheckCircle,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                                label = {
+                                    Text(
+                                        if (asrEngine == AsrEngineType.CLOUD_WHISPER_API) {
+                                            asrEngine.label
+                                        } else if (ready) {
+                                            "${asrEngine.label} · 已就绪"
+                                        } else {
+                                            asrEngine.label
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = selectedAsr.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    if (selectedAsr != AsrEngineType.CLOUD_WHISPER_API) {
+                        if (isAnyAsrDownloading && asrDownloadProgress?.engine == selectedAsr) {
+                            LinearProgressIndicator(
+                                progress = { asrDownloadProgress.progressFraction.coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                            )
+                            Text(
+                                text = asrDownloadProgress.statusText,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else if (isSelectedAsrReady) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.CheckCircle,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "内置离线模型已就绪，无需系统语音服务或谷歌框架",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (config.displayMode != TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+                                    Button(
+                                        onClick = { onSelectDisplayMode(TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) },
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("开启视频原声识别 + 翻译")
+                                    }
+                                }
+                                AssistChip(
+                                    onClick = { onDeleteAsrModel(selectedAsr) },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    },
+                                    label = { Text("清理离线模型") }
+                                )
+                            }
+                        } else {
+                            Button(
+                                enabled = !isAnyAsrDownloading,
+                                onClick = { onDownloadAsrModel(selectedAsr, true) },
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("一键下载离线识别模型并开启（国内镜像）")
+                            }
+                            asrDownloadProgress
+                                ?.takeIf { it.engine == selectedAsr && !it.isDownloading }
+                                ?.statusText
+                                ?.let { status ->
+                                    Text(
+                                        text = status,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                        }
+                    } else {
+                        Text(
+                            text = "请在「设置中心」填写云端 Whisper 接口地址与 API Key（支持硅基流动 SenseVoiceSmall、Groq、OpenAI 及局域网 faster-whisper）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (config.displayMode != TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) {
+                            FilledTonalButton(
+                                onClick = { onSelectDisplayMode(TranslationDisplayMode.LIVE_SPEECH_BILINGUAL) },
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("启用云端原声识别 + 翻译")
+                            }
+                        }
+                    }
                 }
             }
 
@@ -203,7 +373,7 @@ fun TranslationControlSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-            Text("实时翻译引擎", style = MaterialTheme.typography.titleMedium)
+            Text("文本翻译引擎（将识别结果或原字幕译为目标语言）", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(6.dp))
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -224,7 +394,7 @@ fun TranslationControlSheet(
                 color = MaterialTheme.colorScheme.primary
             )
 
-            // Offline Language Pack Manager (always clickable, live status!)
+            // Offline ML Kit Text Translation Pack Manager
             if (config.engine == TranslationEngineType.MLKIT_OFFLINE) {
                 Spacer(modifier = Modifier.height(10.dp))
                 Surface(
@@ -237,7 +407,7 @@ fun TranslationControlSheet(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "离线语言模型包管理（点按下载，下载后可完全断网使用）",
+                            text = "离线文本翻译语言包管理（点按下载，下载后可断网翻译）",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -259,7 +429,7 @@ fun TranslationControlSheet(
                                     enabled = !downloadInProgress,
                                     onClick = {
                                         downloadInProgress = true
-                                        offlineStatus = "正在下载 $label 离线模型（约 30MB）…"
+                                        offlineStatus = "正在下载 $label 离线翻译包（约 30MB）…"
                                         onDownloadOfflineLanguagePack(code) { msg, updated ->
                                             offlineStatus = msg
                                             downloadedCodes = updated
@@ -287,7 +457,7 @@ fun TranslationControlSheet(
                                 enabled = !downloadInProgress,
                                 onClick = {
                                     downloadInProgress = true
-                                    offlineStatus = "正在下载当前语言组合离线模型…"
+                                    offlineStatus = "正在下载当前语言组合离线包…"
                                     onDownloadOfflinePack { msg ->
                                         offlineStatus = msg
                                         downloadInProgress = false

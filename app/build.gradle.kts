@@ -60,8 +60,8 @@ android {
         applicationId = "com.padvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -83,6 +83,9 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            }
             signingConfig = if (hasReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
@@ -170,6 +173,9 @@ dependencies {
     // Google ML Kit On-Device Neural Translation & Language ID
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
+
+    // Built-in Offline Neural Speech-to-Text Engine (Sherpa-ONNX: SenseVoiceSmall & Whisper, zero GMS dependency)
+    implementation(files("libs/sherpa-onnx-2.0.2.aar"))
 
     // Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")

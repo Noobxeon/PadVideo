@@ -9,6 +9,7 @@ import com.padvideo.data.repository.QuarkDriveRepository
 import com.padvideo.data.repository.RealtimeTranslationRepository
 import com.padvideo.data.repository.SmbRepository
 import com.padvideo.data.repository.WebDavRepository
+import com.padvideo.player.VideoSpeechRecognizerEngine
 import java.io.File
 
 class AppContainer(context: Context) {
@@ -23,6 +24,9 @@ class AppContainer(context: Context) {
     val fileExplorerRepository = FileExplorerRepository(appContext)
     val translationRepository = RealtimeTranslationRepository(
         cacheDirectory = File(appContext.cacheDir, "translations")
+    )
+    val videoSpeechRecognizer = VideoSpeechRecognizerEngine(
+        modelsRootDir = File(appContext.filesDir, "asr_models")
     )
     val onlineSubtitleRepository = OnlineSubtitleRepository(
         subtitleStorageDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "Subtitles"),
